@@ -50,8 +50,9 @@ def test_cli_single_nav_file_still_audits(tmp_path, capsys):
         f, index=False)
     code = main([str(f)])
     out = capsys.readouterr().out
+    from strategy_audit import capability as cap
     assert "策略层显著性" in out
-    assert "审不了 8 项" in out
+    assert f"审不了 {len(cap.available({cap.NAV})[1])} 项" in out
     assert code in (0, 1)
 
 
@@ -59,7 +60,10 @@ def test_cli_demo_needs_no_data(capsys):
     """★ 没有数据也能先看报告长什么样。"""
     code = main(["--demo"])
     out = capsys.readouterr().out
-    assert "内置合成数据" in out and "能审 11/12 项" in out
+    from strategy_audit import capability as cap
+    n_ok = len(cap.available({cap.W, cap.P, cap.NAV})[0])
+    assert "内置合成数据" in out
+    assert f"能审 {n_ok}/{len(cap.CHECKS)} 项" in out
     # 演示数据故意含缺陷（6 只退市股）⇒ 有 BLOCK ⇒ 退出码必须是 1。
     # 同一个工具在不同入口给不同的退出码语义是最难查的坑。
     assert "1 项 BLOCK" in out

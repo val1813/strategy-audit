@@ -14,17 +14,25 @@ from strategy_audit import capability as cap
 
 
 def test_nav_only_unlocks_significance_family():
+    """★ 计数从 CHECKS 推导，不写死。
+
+    新增一族检查时写死的数字会让一堆测试红掉，而那些测试跟新族毫无关系
+    —— 实测加族四(风险身份)时 7 个测试因此失败。
+    该断言的真意是「只有净值时解锁的恰好是族三」，那就直接这么断言。
+    """
     ok, no = cap.available({cap.NAV})
-    assert len(ok) == 4
+    nav_only = [c for c in cap.CHECKS if set(c.needs) == {cap.NAV}]
+    assert len(ok) == len(nav_only)
     assert all(c.section == "策略层显著性" for c in ok)
-    assert len(no) == 8
+    assert len(no) == len(cap.CHECKS) - len(ok)
 
 
 def test_weights_and_prices_unlock_almost_all():
+    """权重+价格+净值 ⇒ 只剩需要净收益序列的那些审不了。"""
     ok, no = cap.available({cap.W, cap.P, cap.NAV})
-    assert len(ok) == 11
-    # 只剩毛净对账（需要净收益序列）
-    assert [c.key for c in no] == ["reconcile"]
+    assert len(ok) == len(cap.CHECKS) - len(no)
+    assert all(cap.NET in c.needs for c in no), [c.key for c in no]
+    assert "reconcile" in [c.key for c in no]
 
 
 def test_nothing_unlocks_nothing():
@@ -74,8 +82,9 @@ def test_missing_value_empty_when_all_present():
 def test_matrix_text_distinguishes_cannot_from_passed():
     """★ 报告必须写明「审不了 ≠ 查过通过」。"""
     txt = cap.matrix_text({cap.NAV})
-    assert "能审 4/12 项" in txt
-    assert "审不了 8 项" in txt
+    ok, no = cap.available({cap.NAV})
+    assert f"能审 {len(ok)}/{len(cap.CHECKS)} 项" in txt
+    assert f"审不了 {len(no)} 项" in txt
     assert "【不是】查过通过" in txt
 
 

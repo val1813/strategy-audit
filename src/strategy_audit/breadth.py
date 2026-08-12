@@ -25,16 +25,19 @@ BLOCK 的语义是「净值不可信，先修」。注数压缩不会让净值�
 「一个平均数」的量没有可辩护的差异。这个比值回答的是平均相关系数
 答不了的问题：市场模式被拿掉之后，这本账自己的残差还分散不分散。
 
-★ 市场代理是本模块唯一的自造输入，偏差方向必须说清
-----------------------------------------------
-工具只有价格面板，没有真正的市值加权市场指数，所以市场代理用
-【价格面板全体的截面等权收益】。当价格面板≈持仓本身时，这个代理
-就是这本账自己的平均收益，减掉它等于把这本账的共同模式直接减掉 ⇒
-残差看起来更独立 ⇒ **breadth 被高估、问题被低报**。
+★ 市场代理是本模块唯一的自造输入
+------------------------------
+工具只有价格面板，没有真市值加权指数，所以代理用价格面板股票池的
+截面等权收益，且**逐标的留一**（算 r_i 的残差时代理不含 r_i）。
+留一不是精致化，是正确性要求：共用一条含自己的均值会机械压出残差
+负相关，把注数抬到超过持仓数（合成面板实测 20 只报 28.9 注）。
+详见 `_loo_residuals` 的文档。
 
-偏差方向是保守的（不会凭空造出告警），但仍然是偏差，所以：
-面板股票池不到持仓数 2 倍时不跑同规模对照，不到持仓数+10 或 30 只
-时整族跳过并写明原因。
+仍然存在的偏差：等权代理不等于用户真实的风险模型。用户若有自己的
+因子残差，`residual_breadth()` 可以直接吃残差矩阵，绕开这一层。
+
+同规模对照要求股票池至少是持仓数的 2 倍，否则抽出来的组合与本账
+大量重叠、对照失去意义，此时该项跳过并写明原因。
 
 ★ 高维区间（n 接近或超过窗口长度）
 --------------------------------
@@ -90,7 +93,7 @@ def effective_names(w: np.ndarray) -> float:
     return 1.0 / s if s > 0 else np.nan
 
 
-def breadth(resid: np.ndarray, w: np.ndarray | None = None) -> float:
+def residual_breadth(resid: np.ndarray, w: np.ndarray | None = None) -> float:
     """残差有效注数 = [w'diag(Σ)w] / [w'Σw] / Σwᵢ²。
 
     resid  T × n 残差矩阵（已去市场）
@@ -119,7 +122,7 @@ def breadth(resid: np.ndarray, w: np.ndarray | None = None) -> float:
 def enb(resid: np.ndarray, w: np.ndarray | None = None) -> float:
     """Meucci(2009) 有效注数：残差主成分上方差贡献的熵指数。
 
-    ★ 和 breadth() 不是同一个量，本模块把两个都算出来是为了让用户
+    ★ 和 residual_breadth() 不是同一个量，本模块把两个都算出来是为了让用户
     自己核对，而不是由我们断言「不一样」。
 
     ENB 问的是风险在互不相关的方向上摊得均不均匀；breadth 问的是
@@ -155,15 +158,67 @@ def _returns(pm: pd.DataFrame) -> pd.DataFrame:
     return r.where(np.isfinite(r))
 
 
-def _residuals(X: pd.DataFrame, mc: np.ndarray) -> np.ndarray:
-    """对去均值的市场代理 mc 做单因子回归，返回残差矩阵。"""
-    Xc = X.fillna(0.0).to_numpy(dtype=float)
-    Xc = Xc - Xc.mean(axis=0)
-    den = float(mc @ mc)
-    if den <= 0:
-        return Xc
-    beta = (Xc.T @ mc) / den
-    return Xc - np.outer(mc, beta)
+MIN_COMPLEMENT = 10
+
+
+def _residuals(block: pd.DataFrame, cols: list) -> tuple[np.ndarray, bool]:
+    """去掉市场后的残差矩阵（T × len(cols)），市场代理取【持仓之外】的等权均值。
+
+    返回 (残差矩阵, 代理是否干净)。
+
+    ★ 代理的构造方式改过两轮，每轮都是合成面板抓出来的实质 bug。
+    ----------------------------------------------------------
+    第一版：整个股票池的等权均值，所有标的共用一条。
+      每只标的自己就在那条均值里 ⇒ β_i 被机械地推向 1，残差之间压出约
+      −1/(K−1) 的负相关。负相关让 w'Σw 小于对角线预测，注数被抬到
+      【超过持仓数】：60 只池子持 20 只，实测 28.9 注，与解析预测
+      20/(1 − 19/59) = 29.5 吻合。「20 只票持了 29 注独立的赌」荒谬 ——
+      这个度量的上界本应是 1/Σw²。
+
+    第二版（留一）：算 r_i 的残差时代理不含 r_i。
+      修好了「无因子时 β 被推向 1」：独立面板上注数回到 19.98 ≈ 20。
+      但真有共同因子时 β_i ≈ 1，此时 resid_i ≈ e_i − ē_{−i}，而 ē_{−i}
+      含 e_j（权重 1/(K−1)）⇒ 残差仍被压出负相关，注数仍然超过持仓数
+      （单因子面板实测 28.9）。⇒ 留一只修了一半。
+
+    第三版（本版，持仓之外）：代理 = 股票池里【不在本账】的标的等权均值。
+      代理与任何持仓标的都不共享特有项 ⇒ 不再有负相关通道。
+      残余偏差改为【正】的一小项（所有持仓共享代理自己的特有噪声
+      Var ≈ σ²/|complement|）⇒ 注数被【低估】、问题被【高报】。
+      对审计工具这是安全方向（不会把有问题的账放过去），且量级随
+      complement 变大而衰减，所以要求 complement ≥ MIN_COMPLEMENT。
+
+    complement 不够时退回留一，并把这件事回报给上层写进报告 ——
+    静默降级等于让用户以为用的是干净口径。
+    """
+    Xall = block.fillna(0.0).to_numpy(dtype=float)
+    Xall = Xall - Xall.mean(axis=0)
+    pos = {c: i for i, c in enumerate(block.columns)}
+    idx = [pos[c] for c in cols]
+    Y = Xall[:, idx]
+
+    out = [i for i in range(Xall.shape[1]) if i not in set(idx)]
+    if len(out) >= MIN_COMPLEMENT:
+        m = Xall[:, out].mean(axis=1)
+        m = m - m.mean()
+        den = float(m @ m)
+        if den <= 0:
+            return Y, False
+        beta = (Y.T @ m) / den
+        return Y - np.outer(m, beta), True
+
+    # 退路：留一代理（代理不含自己，但仍与其他持仓共享特有项）
+    K = Xall.shape[1]
+    if K < 3:
+        return Y, False
+    tot = Xall.sum(axis=1)
+    M = (tot[:, None] - Y) / (K - 1)
+    M = M - M.mean(axis=0)
+    den_v = (M * M).sum(axis=0)
+    num_v = (Y * M).sum(axis=0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        b = np.where(den_v > 0, num_v / den_v, 0.0)
+    return Y - M * b, False
 
 
 def residual_breadth_panel(wm: pd.DataFrame, pm: pd.DataFrame,
@@ -186,9 +241,8 @@ def residual_breadth_panel(wm: pd.DataFrame, pm: pd.DataFrame,
     notes: list[str] = []
     wm, pm = align(wm, pm)
     rm = _returns(pm)
-    # 市场代理：面板全体的截面等权收益。偏差方向见模块文档。
-    mkt = rm.mean(axis=1, skipna=True)
-
+    # 市场代理在 _loo_residuals 里逐标的构造（留一），不在这里算一条共用的。
+    # 共用一条会把标的自己算进代理，机械压出残差负相关，见该函数文档。
     dates = [d for d in wm.index if d in rm.index]
     if len(dates) > max_dates:
         step = int(np.ceil(len(dates) / max_dates))
@@ -205,13 +259,11 @@ def residual_breadth_panel(wm: pd.DataFrame, pm: pd.DataFrame,
             continue
         sl = slice(loc - window + 1, loc + 1)
         blk = rm.iloc[sl]
-        mk = mkt.iloc[sl]
-        good = mk.notna().to_numpy()
+        # 有效日：该窗口内至少有两只标的有收益（留一代理才有东西可算）
+        good = (blk.notna().sum(axis=1) >= 2).to_numpy()
         if good.sum() < min_obs:
             continue
         blk = blk[good]
-        mkv = mk[good].to_numpy(dtype=float)
-        mc = mkv - mkv.mean()
 
         enough = blk.columns[blk.notna().sum() >= min_obs]
         w_all = wm.loc[t]
@@ -224,16 +276,21 @@ def residual_breadth_panel(wm: pd.DataFrame, pm: pd.DataFrame,
         if gross <= 0:
             continue
         w = w / gross
-        resid = _residuals(blk[held], mc)
+        # ★ 代理必须从【整个股票池】construct，不能只用持仓。
+        # 只用持仓时代理会随持仓数变化，本账和同规模对照就不是在同一个
+        # 市场定义下比较了 —— 识别检验要求股票池固定、只换挑哪些名字。
+        uni = list(enough)
+        resid, clean = _residuals(blk[uni], held)
 
         rec = {
             "date": t,
             "n": len(held),
             "n_obs": int(good.sum()),
             "n_universe": int(len(enough)),
+            "proxy_clean": bool(clean),
             "ne_nominal": effective_names(w),
-            "breadth": breadth(resid, w),
-            "breadth_ew": breadth(resid),
+            "breadth": residual_breadth(resid, w),
+            "breadth_ew": residual_breadth(resid),
             "enb": enb(resid, w),
             "breadth_ctrl": np.nan,
         }
@@ -243,9 +300,16 @@ def residual_breadth_panel(wm: pd.DataFrame, pm: pd.DataFrame,
         pool = list(enough)
         if len(pool) >= 2 * len(held):
             draws = []
+            # ★ 对照必须用【和本账相同的权重向量】。
+            # 第一版这里漏了 w，对照实际是等权，而本账是市值加权 ——
+            # 于是「本账 7.0 注 vs 对照 30.7 注」里绝大部分差异来自
+            # 加权方式，不是选股。报告自己就带着反证：同一批持仓改等权
+            # 是 11.3 注（不是 7.0）。文档承诺「加权固定」，代码没做到。
+            # 识别检验只允许变一个东西：挑哪些名字。
             for _ in range(N_CTRL_DRAWS):
                 pick = list(rng.choice(pool, len(held), replace=False))
-                draws.append(breadth(_residuals(blk[pick], mc)))
+                r_ctrl, _ = _residuals(blk[uni], pick)
+                draws.append(residual_breadth(r_ctrl, w))
             draws = [d for d in draws if np.isfinite(d)]
             if draws:
                 rec["breadth_ctrl"] = float(np.median(draws))
@@ -289,6 +353,28 @@ def check_residual_breadth(d: pd.DataFrame, rep: AuditReport,
     rep.stats["breadth_vol_understate_x"] = vol_x
 
     extra = []
+    # ★ 代理噪声偏差必须报，不能让小股票池假装成告警。
+    # 代理是 complement 的等权均值，本身带 σ²/C 的特有噪声，β≈1 时
+    # 这份噪声进到每只持仓的残差里 ⇒ 压出正相关 ρ≈1/C ⇒ 注数被低估。
+    # 解析预测 b ≈ ne/(1+(ne−1)/C)，反解得到去偏后的下界。
+    comp = _median(d, "n_universe") - n if np.isfinite(_median(d, "n_universe")) else np.nan
+    b_adj = np.nan
+    if np.isfinite(comp) and comp > 0 and np.isfinite(ne) and ne > 1:
+        # 由观测 b 反解「若代理无噪声」的注数：1/b_true = 1/b − (ne−1)/(ne·C)
+        inv = 1.0 / b - (ne - 1.0) / (ne * comp)
+        if inv > 0:
+            b_adj = float(1.0 / inv)
+    rep.stats["breadth_complement"] = comp
+    rep.stats["breadth_proxy_adjusted"] = b_adj
+    if np.isfinite(b_adj) and np.isfinite(b) and b > 0 and abs(b_adj - b) / b >= 0.10:
+        extra.append(f"市场代理由股票池里非持仓的 {comp:.0f} 只构成，"
+                     f"它自身的特有噪声会把注数压低；扣掉这一项约 "
+                     f"{b_adj:.1f} 注（合成面板上该修正的解析预测与实测"
+                     f"吻合到 2%）⇒ 下面的倍数按未扣的 {b:.1f} 报，是保守侧")
+    if not bool(d.get("proxy_clean", pd.Series([True])).all()):
+        extra.append(f"部分调仓日股票池里非持仓的标的不足 "
+                     f"{MIN_COMPLEMENT} 只，那些日期退回了留一代理"
+                     "（代理与其他持仓共享特有项，注数会被抬高）")
     n_obs = _median(d, "n_obs")
     if np.isfinite(n) and np.isfinite(n_obs) and n_obs > 0 and n / n_obs > HIGHDIM_NOTE:
         extra.append(f"n/T = {n:.0f}/{n_obs:.0f} = {n / n_obs:.2f}，"

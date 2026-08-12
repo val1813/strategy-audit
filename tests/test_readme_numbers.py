@@ -145,27 +145,28 @@ def test_readme_test_count_matches():
 # ---------------- 「你有什么→能审什么」那张表 ----------------
 
 def test_readme_capability_counts():
-    """README 表格里的 4 / 11 / 12 项必须与代码一致。"""
+    """README 那张表的三个计数必须与 CHECKS 一致（加检查就得改 README）。"""
     from strategy_audit import capability as cap
     readme = _readme()
     n_nav = len(cap.available({cap.NAV})[0])
     n_wp = len(cap.available({cap.W, cap.P, cap.NAV})[0])
     n_all = len(cap.CHECKS)
-    assert n_nav == 4 and n_wp == 11 and n_all == 12, (n_nav, n_wp, n_all)
-    assert f"**{n_nav} 项**" in readme
-    assert f"**{n_wp} 项**" in readme
-    assert f"**{n_all} 项**" in readme
+    # 计数从 CHECKS 推导；README 必须跟着 CHECKS 走，不是反过来
+    assert f"**{n_nav} 项**" in readme, f"README 未写 {n_nav} 项(只有净值)"
+    assert f"**{n_wp} 项**" in readme, f"README 未写 {n_wp} 项(权重+价格)"
+    assert f"**{n_all} 项**" in readme, f"README 未写 {n_all} 项(全部)"
     assert f"{n_all - n_wp} 项（毛净对账要净收益）" in readme
 
 
 def test_readme_demo_capability_claim():
-    """--demo 说「能审 11/12 项」必须是真的。"""
+    """--demo 报的「能审 N/M 项」必须是真的，且缺的那几项都只缺净收益。"""
     from strategy_audit.cli import _demo_inputs
     from strategy_audit import audit, capability as cap
     w, p = _demo_inputs()
     rep = audit(w, p, show_detection=False)
     ok, no = cap.available(set(rep.stats["capability"]))
-    assert len(ok) == 11 and len(no) == 1
+    assert len(ok) == len(cap.CHECKS) - len(no)
+    assert all(cap.NET in c.needs for c in no)
 
 
 # ---------------- 六个「工具自己被抓到的错」 ----------------

@@ -50,6 +50,15 @@ from .lookahead import (
     check_universe_survivorship,
     check_weight_lookahead,
 )
+from .breadth import (
+    check_breadth_control,
+    check_breadth_vs_enb,
+    check_residual_breadth,
+    effective_names,
+    enb,
+    residual_breadth,
+    residual_breadth_panel,
+)
 from .report import BLOCK, OK, WARN, AuditReport, Finding
 from .significance import (
     check_deflated_sharpe,
@@ -123,5 +132,13 @@ __all__ = [
     "check_weight_lookahead",
     "check_universe_survivorship",
     "check_membership_accounting",
+    # 族四
+    "check_residual_breadth",
+    "check_breadth_control",
+    "check_breadth_vs_enb",
+    "residual_breadth_panel",
+    "residual_breadth",
+    "enb",
+    "effective_names",
     "__version__",
 ]
