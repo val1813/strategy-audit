@@ -1,0 +1,6 @@
+include README.md
+include LICENSE
+recursive-include tests *.py
+# 与 factor-audit 同：不打包行情数据（版权），客户自备
+prune data
+prune _retired

@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "strategy-audit"
+version = "0.1.0"
+description = "Audit backtest-to-NAV defects: understated turnover, lookahead in weights and universe, and index-membership accounting."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "strategy-audit contributors" }]
+keywords = [
+    "quantitative-finance",
+    "backtesting",
+    "turnover",
+    "transaction-costs",
+    "lookahead-bias",
+    "portfolio-analysis",
+    "a-share",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Financial and Insurance Industry",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Office/Business :: Financial :: Investment",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+]
+
+# ★ 与 factor-audit 同一条原则：不含任何数据源依赖。
+# 实测过的失败模式（baostock 非线程安全会拉黑 IP、akshare 间歇 ProxyError、
+# tdx 对退市股返回「空 + success」）会变成本工具的失败，而客户会认为是我们坏了。
+dependencies = [
+    "pandas>=1.5",
+    "numpy>=1.21",
+]
+
+[project.optional-dependencies]
+parquet = ["pyarrow>=10"]
+dev = ["pytest>=7", "pyarrow>=10"]
+
+[project.scripts]
+strategy-audit = "strategy_audit.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/val1813/strategy-audit"
+Issues = "https://github.com/val1813/strategy-audit/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
