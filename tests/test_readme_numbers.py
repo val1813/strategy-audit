@@ -140,3 +140,107 @@ def test_readme_test_count_matches():
     readme = (root / "README.md").read_text(encoding="utf-8")
     assert f"{total} 个测试" in readme, (
         f"实际 {total} 个测试，README 未同步")
+
+
+# ---------------- 「你有什么→能审什么」那张表 ----------------
+
+def test_readme_capability_counts():
+    """README 表格里的 4 / 11 / 12 项必须与代码一致。"""
+    from strategy_audit import capability as cap
+    readme = _readme()
+    n_nav = len(cap.available({cap.NAV})[0])
+    n_wp = len(cap.available({cap.W, cap.P, cap.NAV})[0])
+    n_all = len(cap.CHECKS)
+    assert n_nav == 4 and n_wp == 11 and n_all == 12, (n_nav, n_wp, n_all)
+    assert f"**{n_nav} 项**" in readme
+    assert f"**{n_wp} 项**" in readme
+    assert f"**{n_all} 项**" in readme
+    assert f"{n_all - n_wp} 项（毛净对账要净收益）" in readme
+
+
+def test_readme_demo_capability_claim():
+    """--demo 说「能审 11/12 项」必须是真的。"""
+    from strategy_audit.cli import _demo_inputs
+    from strategy_audit import audit, capability as cap
+    w, p = _demo_inputs()
+    rep = audit(w, p, show_detection=False)
+    ok, no = cap.available(set(rep.stats["capability"]))
+    assert len(ok) == 11 and len(no) == 1
+
+
+# ---------------- 六个「工具自己被抓到的错」 ----------------
+
+def test_readme_conc_false_positive_claim():
+    """§③ 固定门槛 0.50 误报 61%、零分布中位数 0.53。"""
+    import numpy as np
+    idx = pd.date_range("2016-01-31", periods=120, freq="ME")
+    tops = []
+    for s in range(400):
+        r = pd.Series(np.random.default_rng(s).normal(0.006, 0.045, 120),
+                      index=idx)
+        by = r.groupby(r.index.year).apply(lambda x: float((1 + x).prod() - 1))
+        pos = by[by > 0]
+        if len(pos) >= 2 and float((1 + r).prod() - 1) > 0:
+            tops.append(float(pos.nlargest(2).sum() / pos.sum()))
+    t = np.array(tops)
+    assert abs(float(np.median(t)) - 0.53) < 0.02, float(np.median(t))
+    assert abs(float((t > 0.5).mean()) - 0.61) < 0.04, float((t > 0.5).mean())
+
+
+def test_readme_single_period_null_claim():
+    """§④ 「单期占累计」纯噪声 p90=0.78 / p95=1.45。"""
+    import numpy as np
+    idx = pd.date_range("2016-01-31", periods=120, freq="ME")
+    sh = []
+    for s in range(400):
+        r = pd.Series(np.random.default_rng(s).normal(0.006, 0.045, 120),
+                      index=idx)
+        tot = float((1 + r).cumprod().iloc[-1] - 1)
+        if abs(tot) > 1e-9:
+            sh.append(abs(float(r.max()) / tot))
+    a = np.array(sh)
+    assert abs(float(np.quantile(a, .9)) - 0.78) < 0.06
+    assert abs(float(np.quantile(a, .95)) - 1.45) < 0.20
+
+
+def test_readme_nw_crossing_claim():
+    """§⑤ 16% 的纯噪声跨过 |t|=2，跨度中位数 0.57。"""
+    import numpy as np
+    from strategy_audit import significance as sg
+    idx = pd.date_range("2016-01-31", periods=120, freq="ME")
+    cross, gaps = 0, []
+    N = 200
+    for s in range(N):
+        r = pd.Series(np.random.default_rng(5000 + s).normal(0.006, 0.045, 120),
+                      index=idx)
+        ts = {L: sg.newey_west_t(r.values, L) for L in range(13)}
+        ts = {k: v for k, v in ts.items() if np.isfinite(v)}
+        lo, hi = min(abs(v) for v in ts.values()), max(abs(v) for v in ts.values())
+        if lo < 2.0 <= hi:
+            cross += 1
+            gaps.append(hi - lo)
+    assert abs(cross / N - 0.16) < 0.03, cross / N
+    assert abs(float(np.median(gaps)) - 0.57) < 0.08
+
+
+def test_readme_sharpe_se_agreement_claim():
+    """§⑥ 修好后两个独立估计差异 < 1.2%（4 组种子）。"""
+    from strategy_audit import significance as sg
+    from strategy_audit.core import annualize
+    import numpy as np
+    idx = pd.date_range("2016-01-31", periods=120, freq="ME")
+    worst = 0.0
+    for seed in (3, 11, 7, 21):
+        r = pd.Series(np.random.default_rng(seed).normal(0.006, 0.045, 120),
+                      index=idx)
+        sr = annualize(r, 12.0)["sharpe"]
+        se = sg.deflated_sharpe(sr, len(r), 1, 12.0)["se"]
+        t_nw = sg.newey_west_t(r.values, 0)
+        worst = max(worst, abs(sr / se - t_nw) / abs(t_nw))
+    assert worst <= 0.013, f"实测最大差异 {worst:.2%}，README 写 ≤1.3%"
+
+
+def _readme():
+    from pathlib import Path
+    return (Path(__file__).resolve().parent.parent / "README.md").read_text(
+        encoding="utf-8")

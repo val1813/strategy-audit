@@ -28,8 +28,10 @@
 
 from __future__ import annotations
 
-from ._api import audit_strategy
+from ._api import audit, audit_strategy
+from .capability import CHECKS, available, matrix_text, missing_value
 from .contract import check_gross, load_prices, load_weights, normalize_gross, to_matrix
+from .detect import Detected, classify_series, detect_all, detect_frame
 from .core import (
     MISSING_POLICIES,
     align,
@@ -49,6 +51,15 @@ from .lookahead import (
     check_weight_lookahead,
 )
 from .report import BLOCK, OK, WARN, AuditReport, Finding
+from .significance import (
+    check_deflated_sharpe,
+    check_drawdown,
+    check_nw_lag_sensitivity,
+    check_year_concentration,
+    deflated_sharpe,
+    newey_west_t,
+    to_returns,
+)
 from .turnover_cost import (
     breakeven_cost,
     check_breakeven,
@@ -60,9 +71,27 @@ from .turnover_cost import (
 __version__ = "0.1.0"
 
 __all__ = [
+    "audit",
     "audit_strategy",
     "AuditReport",
     "Finding",
+    # 识别与能力
+    "detect_frame",
+    "detect_all",
+    "classify_series",
+    "Detected",
+    "CHECKS",
+    "available",
+    "missing_value",
+    "matrix_text",
+    # 族三
+    "check_year_concentration",
+    "check_nw_lag_sensitivity",
+    "check_deflated_sharpe",
+    "check_drawdown",
+    "deflated_sharpe",
+    "newey_west_t",
+    "to_returns",
     "BLOCK",
     "WARN",
     "OK",

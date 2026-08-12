@@ -40,6 +40,8 @@ class AuditReport:
     stats: dict = field(default_factory=dict)
     # 检查未能执行的原因（缺列等），与"检查执行了但通过"区分开
     skipped: list[str] = field(default_factory=list)
+    # 能力矩阵文本（capability.matrix_text 的结果），打在报告最前面
+    capability: str = ""
 
     def add(self, level, name, detail, impact="", section=""):
         self.findings.append(Finding(level, name, detail, impact, section))
@@ -74,6 +76,14 @@ class AuditReport:
     def text(self) -> str:
         w = 68
         lines = ["=" * w, f"  {self.title}", "=" * w, ""]
+
+        # ★ 能力矩阵打在最前面：用户第一眼就该看到边界在哪，
+        # 而不是读完报告才发现有八项根本没查。
+        if self.capability:
+            lines.append(self.capability)
+            lines.append("")
+            lines.append("-" * w)
+            lines.append("")
 
         s = self.stats
         if s:
