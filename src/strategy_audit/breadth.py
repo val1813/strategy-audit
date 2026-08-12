@@ -74,9 +74,21 @@ CTRL_SEED = 20260812
 # 残差波动低估倍数：按残差独立编预算，实际波动是预算的多少倍
 UNDERSTATE_WARN = 2.0
 
-# 本账注数 / 同规模随机组合注数。低于此值 ⇒ 压缩是选股带来的，
-# 不是「同规模组合都这样」
+# 本账注数落在同规模随机组合抽样分布的哪个分位（越高＝越比对照集中）。
+# ★ 主判据用分位而不用 b/c 硬比值，理由与族三改用置换零分布相同：
+# 硬门槛是刀锋判定。实测 6.5 注 vs 对照 11.8 注（比值 0.55）曾被 0.5 的
+# 门槛判 OK 并写成「不是这本账的选股特征」，而 6.5 相对 11.8 已接近腰斩 ——
+# 0.55 与 0.49 之间没有实质差别，却给出完全相反的对外说法。
+CTRL_PCTILE_WARN = 0.80
+
+# 比值门槛保留为兜底：分位算不出来时（对照抽样全退化）仍要有判据。
 CTRL_RATIO_WARN = 0.5
+
+# 本账注数低于这么高比例的同规模随机组合 ⇒ 压缩里有选股的贡献。
+# ★ 分位判据优先于 CTRL_RATIO_WARN 那个比值门槛：比值 0.55 vs 0.49 之间
+# 没有实质差别，却会给出完全相反的对外说法（实测真面板 0.55 被判 OK 并
+# 写成「不是选股特征」，而 6.5 注 vs 11.8 注已接近腰斩）。
+CTRL_PCTILE_WARN = 0.80
 
 # n/T 超过这个比例时在报告里点明高维估计噪声
 HIGHDIM_NOTE = 0.5
@@ -313,6 +325,14 @@ def residual_breadth_panel(wm: pd.DataFrame, pm: pd.DataFrame,
             draws = [d for d in draws if np.isfinite(d)]
             if draws:
                 rec["breadth_ctrl"] = float(np.median(draws))
+                # ★ 20 次抽样本身就是一个零分布 —— 记下本账落在它的哪个分位。
+                # 只报「比值 0.55」再拿 0.5 当门槛是刀锋判定：0.55 判「不是选股」、
+                # 0.49 判「是选股」，而这个量本身带抽样噪声。分位数才是识别检验
+                # 该用的判据（与族三的置换零分布同一套办法）。
+                bk = rec["breadth"]
+                if np.isfinite(bk):
+                    rec["ctrl_pctile"] = float(np.mean(
+                        [1.0 if bk < x else 0.0 for x in draws]))
         rows.append(rec)
 
     if not rows:
@@ -363,7 +383,10 @@ def check_residual_breadth(d: pd.DataFrame, rep: AuditReport,
         # 由观测 b 反解「若代理无噪声」的注数：1/b_true = 1/b − (ne−1)/(ne·C)
         inv = 1.0 / b - (ne - 1.0) / (ne * comp)
         if inv > 0:
-            b_adj = float(1.0 / inv)
+            # ★ 必须按 1/Σw² 截断。去偏是一阶近似，小 C 且 b 已接近 ne 时
+            # 会反解出【超过持仓数】的注数（demo 实测 8 只报 12.9 注）——
+            # 注数的硬上界就是名义有效持仓数，报出去就是自相矛盾。
+            b_adj = float(min(1.0 / inv, ne))
     rep.stats["breadth_complement"] = comp
     rep.stats["breadth_proxy_adjusted"] = b_adj
     if np.isfinite(b_adj) and np.isfinite(b) and b > 0 and abs(b_adj - b) / b >= 0.10:
@@ -396,11 +419,19 @@ def check_residual_breadth(d: pd.DataFrame, rep: AuditReport,
     if extra:
         detail += "\n" + "\n".join(extra)
 
-    impact = (f"按「残差互不相关」编特定风险预算，会把组合残差波动低估 "
-              f"{vol_x:.2f} 倍（真实 w'Σw 是对角线预测的 {ratio:.1f} 倍）。"
-              f"\n★ 这不影响净值对不对，影响的是风险预算和对外披露的"
-              f"分散化程度")
-    level = WARN if vol_x >= UNDERSTATE_WARN else OK
+    # ★ ratio ≤ 1 时不存在「低估」，不能照着模板报 0.98 倍。
+    # 实测 demo 就打印过「低估 0.98 倍」—— 那是残差比对角线预测还小
+    # （代理噪声或估计误差），语义上等于「没有低估」。倍数只在 >1 时有意义。
+    if ratio > 1.0:
+        impact = (f"按「残差互不相关」编特定风险预算，会把组合残差波动低估 "
+                  f"{vol_x:.2f} 倍（真实 w'Σw 是对角线预测的 {ratio:.1f} 倍）。"
+                  f"\n★ 这不影响净值对不对，影响的是风险预算和对外披露的"
+                  f"分散化程度")
+    else:
+        impact = (f"残差注数不低于名义有效持仓数（{b:.1f} vs {ne:.1f}）⇒ "
+                  f"按残差独立编的特定风险预算【没有】被这本账的残差共动"
+                  f"击穿，这一项无需打折")
+    level = WARN if ratio > 1.0 and vol_x >= UNDERSTATE_WARN else OK
     rep.add(level, "残差有效注数", detail, impact, section=SECTION)
 
 
@@ -433,18 +464,48 @@ def check_breadth_control(d: pd.DataFrame, rep: AuditReport) -> None:
     detail = (f"本账 {b:.1f} 注 vs 同规模随机组合 {c:.1f} 注"
               f"（{N_CTRL_DRAWS} 次抽样的中位数，{len(ok)} 个调仓日）"
               f"\n股票池、窗口、加权、估计器全部固定，只换「挑哪些名字」")
-    if r < CTRL_RATIO_WARN:
+
+    # ★ 判据用【本账落在对照抽样分布的哪个分位】，不用 b/c 硬门槛。
+    # 第一版拿 0.5 当门槛，于是真实面板上 6.5 注 vs 对照 11.8 注（比值 0.55）
+    # 被判 OK 并写成「不是这本账的选股特征」—— 6.5 相对 11.8 已经接近腰斩，
+    # 结论与自己给出的数字相反。0.55 与 0.49 之间没有实质差别，
+    # 却导致完全相反的对外说法，这是刀锋判定（与族三改用置换零分布同因）。
+    pct = _median(d, "ctrl_pctile") if "ctrl_pctile" in d.columns else np.nan
+    if np.isfinite(pct):
+        rep.stats["breadth_control_pctile"] = pct
+        # ★ 分位是「本账比多少比例的对照更集中」，措辞不能写成
+        # 「低于 100% 的同规模随机组合」—— 真实面板上 pct=1.0 时那句话
+        # 读起来像「比所有组合都低，包括它自己」，是自相矛盾的。
+        # 20 次抽样只能分辨到 1/20，所以 1.0 要报成「全部 20 次」。
+        detail += (f"\n本账注数比 {pct:.0%} 的同规模随机组合更集中"
+                   f"（{N_CTRL_DRAWS} 次抽样，各调仓日分位的中位数）")
+
+    if (np.isfinite(pct) and pct >= CTRL_PCTILE_WARN) or r < CTRL_RATIO_WARN:
+        if np.isfinite(pct):
+            why = (f"比全部 {N_CTRL_DRAWS} 次同规模随机抽样都更集中"
+                   f"（{b:.1f} 注 vs 对照 {c:.1f} 注）"
+                   if pct >= 1.0 - 1e-9 else
+                   f"比 {pct:.0%} 的同规模随机组合更集中")
+        else:
+            why = f"只有同规模随机组合的 {r:.0%}"
         rep.add(WARN, "同规模对照", detail,
-                f"本账注数只有同规模随机组合的 {r:.0%} ⇒ 压缩是【选股】"
-                f"带来的，不是「同规模组合都这样」。这个数可以对外披露，"
-                f"因为它排除了「只是在数名字」这个解释",
+                f"本账注数{why} ⇒ 这个压缩里有【选股】的贡献，"
+                "不能全归给股票池和窗口。对外披露分散化程度时应按残差注数"
+                "而非持仓只数，特定风险预算也要按上一项的低估倍数放大",
                 section=SECTION)
     else:
+        # ★ 不能无条件写「绝对低估倍数仍然成立」——上一项可能报的是
+        # 「没有低估」。两项的口径必须对得上，否则报告自相矛盾。
+        tail = ("上一项报的绝对低估倍数仍然成立，只是"
+                if rep.stats.get("breadth_vol_understate_x", 0) >= 1.0
+                and rep.stats.get("breadth_ne_nominal", 0) >
+                rep.stats.get("breadth_residual", 0)
+                else "")
         rep.add(OK, "同规模对照", detail,
-                f"本账注数是同规模随机组合的 {r:.0%} ⇒ 压缩主要来自"
-                f"股票池和窗口本身，不是这本账的选股特征。"
-                f"★ 绝对低估倍数仍然成立（见上一项），只是不该说成"
-                f"「我们的选股让注数塌了」",
+                f"本账注数是同规模随机组合的 {r:.0%}"
+                + (f"、落在 {pct:.0%} 分位" if np.isfinite(pct) else "")
+                + " ⇒ 与同规模随机组合不可区分，压缩主要来自股票池和窗口本身。"
+                f"★ {tail}不该说成「我们的选股让注数塌了」",
                 section=SECTION)
 
 

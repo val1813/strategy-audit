@@ -205,3 +205,41 @@ def test_report_states_weight_sensitivity():
     bew = rep.stats.get("breadth_residual_ew")
     if b and bew and abs(bew - b) / b > 0.2:
         assert "等权" in rep.findings[0].detail
+
+
+def test_control_verdict_matches_its_own_numbers():
+    """★ 回归：结论不许和自己给出的数字相反。
+
+    第一版拿 b/c < 0.5 当门槛，于是真面板上「本账 6.5 注 vs 对照 11.8 注」
+    （比值 0.55）被判 OK 并写成「不是这本账的选股特征」—— 6.5 相对 11.8
+    已接近腰斩。0.55 与 0.49 之间没有实质差别，却给出完全相反的对外说法。
+    现在按【本账落在对照抽样分布的哪个分位】判。
+    """
+    px, wm = _panel_and_weights(tilt=True)
+    d, _ = br.residual_breadth_panel(wm, px)
+    if not len(d) or d["breadth_ctrl"].dropna().empty:
+        pytest.skip("该合成面板未产生可用对照")
+    rep = AuditReport()
+    br.check_breadth_control(d, rep)
+    f = [x for x in rep.findings if "对照" in x.name][0]
+    b = float(d["breadth"].median())
+    c = float(d["breadth_ctrl"].median())
+    pct = rep.stats.get("breadth_control_pctile")
+    # 本账明显低于对照（腰斩级）时不许说「不是选股特征」
+    if b < 0.7 * c:
+        assert f.level == WARN, (
+            f"本账 {b:.1f} 注 vs 对照 {c:.1f} 注 却判 {f.level}")
+        assert "不是这本账的选股特征" not in f.impact
+    # 分位必须出现在报告里，让用户看到判据本身
+    if pct is not None and np.isfinite(pct):
+        assert "分位" in f.detail or "%" in f.detail
+
+
+def test_control_percentile_recorded_per_date():
+    """分位是逐调仓日算的，必须落进结果表以便复核。"""
+    px, wm = _panel_and_weights()
+    d, _ = br.residual_breadth_panel(wm, px)
+    if len(d) and not d["breadth_ctrl"].dropna().empty:
+        assert "ctrl_pctile" in d.columns
+        v = d["ctrl_pctile"].dropna()
+        assert len(v) and v.between(0, 1).all()
