@@ -44,12 +44,28 @@ def _read_path(p: str) -> pd.DataFrame:
     return pd.read_csv(f)
 
 
+def _clean_series(s: pd.Series) -> pd.Series:
+    """去掉 NaN/±inf，按日期排序，重复日期保留最后一条。
+
+    ★ ±inf 必须显式清掉。实测：净值里一个 inf 会让 pct_change 产生
+    inf/nan，再进 NW t 的方差计算就是 `invalid value in scalar divide`——
+    工具直接崩，而用户完全不知道是哪一行数据的问题。
+    """
+    v = pd.Series(s).astype(float)
+    v = v[np.isfinite(v.values)]
+    if len(v) and not v.index.is_monotonic_increasing:
+        v = v.sort_index()
+    if len(v) and v.index.has_duplicates:
+        v = v[~v.index.duplicated(keep="last")]
+    return v
+
+
 def _as_series(o) -> pd.Series | None:
     """把显式传入的 net/benchmark 规整成 Series（接受路径/表/序列）。"""
     if o is None:
         return None
     if isinstance(o, pd.Series):
-        return o.dropna().astype(float).sort_index()
+        return _clean_series(o)
     if isinstance(o, (str, Path)):
         o = _read_path(str(o))
     if isinstance(o, pd.DataFrame):
@@ -173,7 +189,16 @@ def audit(*inputs, net=None, benchmark=None, n_trials: int = 1,
         have.add(cap.NAV)
     elif nav is not None:
         s, role = nav
-        rets = sg.to_returns(s, role)
+        n_raw = len(s)
+        s = _clean_series(s)
+        if len(s) < n_raw:
+            rep.add(WARN, "序列里有无效值",
+                    f"丢弃 {n_raw - len(s)} 个 NaN/±inf/重复日期的点"
+                    f"（原 {n_raw} 点，剩 {len(s)} 点）",
+                    "±inf 通常来自除以 0 的收益计算或缺价日的除权处理。"
+                    "请核对原始数据，不要指望丢弃它们就没事了",
+                    section="输入识别")
+        rets = _clean_series(sg.to_returns(s, role))
         ppy = periods_per_year(rets.index) if len(rets) > 2 else 252.0
         have.add(cap.NAV)
 
@@ -195,7 +220,9 @@ def audit(*inputs, net=None, benchmark=None, n_trials: int = 1,
     if not have:
         rep.add(BLOCK, "没有可用输入",
                 "所有输入都没能识别成权重表/价格表/净值曲线",
-                "看上面的识别结果。最低要求：一张有 date 列和一列数值的表",
+                "最低可用输入是一条【至少 7 个点】的净值曲线"
+                "（date + 一列数值）；权重表 + 价格表能审全部 12 项。"
+                "想先看报告长什么样，跑 strategy-audit --demo",
                 section="输入识别")
         return rep
 
@@ -229,6 +256,29 @@ def audit(*inputs, net=None, benchmark=None, n_trials: int = 1,
         sg.check_nw_lag_sensitivity(rets, rep)
         sg.check_deflated_sharpe(rets, ppy or 252.0, rep, n_trials=n_trials)
         sg.check_drawdown(rets, rep)
+    elif rets is not None:
+        rep.skip("策略层显著性（全部 4 项）",
+                 f"有效收益只有 {len(rets)} 期，至少需要 6 期")
+
+    # ★ 一条 finding 都没有时必须解释为什么，不能交一份空报告。
+    # 实测：单行表/全 NaN/净值全 0 这三种输入会走到这里 ——
+    # 用户看到的是「什么都没说」，比报错更让人无从下手。
+    if not any(f.section not in ("输入识别", "输入契约") for f in rep.findings):
+        why = []
+        if rets is None:
+            why.append("没能从输入里得到收益序列")
+        elif len(rets) < 6:
+            why.append(f"有效收益只有 {len(rets)} 期（需要 ≥6）")
+        if wm is None:
+            why.append("没有权重面板")
+        if pm is None:
+            why.append("没有价格面板")
+        rep.add(BLOCK, "没有任何检查能跑起来",
+                "；".join(why) or "输入不足",
+                "上面的「未能检查」列出了每一项缺什么。"
+                "最低可用输入是一条【至少 7 个点】的净值曲线"
+                "（date + 一列数值）；想看报告长什么样先跑 --demo",
+                section="输入识别")
 
     # ---- 把审不了的登记成「未能检查」----
     # ★ 缺什么要说人话，不能漏内部键名（"缺 net" 用户看不懂）

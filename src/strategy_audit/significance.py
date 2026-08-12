@@ -409,8 +409,14 @@ def check_drawdown(rets: pd.Series, rep: AuditReport) -> None:
     detail = "；".join(parts)
 
     at = best_at.date() if hasattr(best_at, "date") else best_at
-    extra = (f"\n最好的一期（{at}）收益 {best:+.2%}"
-             f"（距均值 {z_best:.1f} 个标准差）")
+    extra = f"\n最好的一期（{at}）收益 {best:+.2%}"
+    # ★ 波动为 0 时 z 是 nan —— 不许把 nan 打给用户看。
+    # 「距均值 nan 个标准差」这种话会让人以为工具坏了（它确实没算出来，
+    # 但那是因为收益恒定，该说恒定，不该露出 nan）。
+    if np.isfinite(z_best):
+        extra += f"（距均值 {z_best:.1f} 个标准差）"
+    else:
+        extra += "（收益无波动，离群判定不适用）"
     if np.isfinite(share):
         extra += f"，占累计 {total:+.2%} 的 {share:.0%}"
 
