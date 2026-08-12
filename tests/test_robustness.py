@@ -120,3 +120,64 @@ def test_text_renders_for_every_hostile_case():
         assert isinstance(txt, str) and len(txt) > 50, name
         assert "nan" not in txt.lower().replace("nan/", ""), (
             f"{name}：报告里漏出了 nan")
+
+
+# ---------------- 文件格式 ----------------
+
+def _fmt_files(tmp_path):
+    from synth import equal_weight, make_prices, month_ends, to_long
+    px = make_prices(n_codes=12, seed=3)
+    wm = equal_weight(px, month_ends(px), k=5, seed=2)
+    return to_long(wm, "weight"), to_long(px, "close")
+
+
+@pytest.mark.parametrize("ext", ["csv", "parquet", "xlsx", "json"])
+def test_all_formats_give_same_result(tmp_path, ext):
+    """★ 同一份数据换个文件格式，结论必须一样。"""
+    w, p = _fmt_files(tmp_path)
+    if ext == "parquet":
+        pytest.importorskip("pyarrow")
+    if ext == "xlsx":
+        pytest.importorskip("openpyxl")
+    wf, pf = tmp_path / f"w.{ext}", tmp_path / f"p.{ext}"
+    if ext == "csv":
+        w.to_csv(wf, index=False); p.to_csv(pf, index=False)
+    elif ext == "parquet":
+        w.to_parquet(wf); p.to_parquet(pf)
+    elif ext == "xlsx":
+        w.to_excel(wf, index=False); p.to_excel(pf, index=False)
+    else:
+        w.to_json(wf); p.to_json(pf)
+
+    key = lambda r: sorted((f.level, f.name) for f in r.findings
+                           if f.section != "输入识别")
+    ref = audit(w, p, show_detection=False)
+    got = audit(str(wf), str(pf), show_detection=False)
+    assert key(got) == key(ref), f"{ext} 与内存 DataFrame 结论不一致"
+
+
+def test_missing_optional_dep_gives_actionable_message(tmp_path, monkeypatch):
+    """★ 缺 pyarrow/openpyxl 时要说装什么，不能漏 pandas 的 ImportError。"""
+    import pandas as _pd
+    from strategy_audit import _api
+    f = tmp_path / "x.parquet"
+    f.write_bytes(b"not really parquet")
+
+    def boom(*a, **k):
+        raise ImportError("Missing optional dependency 'pyarrow'")
+    monkeypatch.setattr(_pd, "read_parquet", boom)
+    with pytest.raises(SystemExit) as ei:
+        _api._read_path(str(f))
+    msg = str(ei.value)
+    assert "pip install pyarrow" in msg
+    assert "csv" in msg          # 给一条不用装依赖的退路
+
+
+def test_unreadable_file_names_the_file(tmp_path):
+    f = tmp_path / "broken.csv"
+    f.write_bytes(b"\xff\xfe\x00bad binary\x00\x01")
+    try:
+        from strategy_audit import _api
+        _api._read_path(str(f))
+    except SystemExit as e:
+        assert "broken.csv" in str(e)

@@ -43,7 +43,9 @@ dependencies = [
 
 [project.optional-dependencies]
 parquet = ["pyarrow>=10"]
-dev = ["pytest>=7", "pyarrow>=10"]
+excel = ["openpyxl>=3.1"]
+all = ["pyarrow>=10", "openpyxl>=3.1"]
+dev = ["pytest>=7", "pyarrow>=10", "openpyxl>=3.1"]
 
 [project.scripts]
 strategy-audit = "strategy_audit.cli:main"

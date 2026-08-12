@@ -262,7 +262,7 @@ CLI 退出码：有 BLOCK 返回 1，方便进 CI。**WARN 不算失败** ——
 
 ```bash
 pip install -e ".[dev]"
-pytest          # 210 个测试
+pytest          # 216 个测试
 ```
 
 MIT License.

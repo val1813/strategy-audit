@@ -23,6 +23,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from . import breadth as br
 from . import capability as cap
 from . import lookahead as la
 from . import significance as sg
@@ -34,14 +35,42 @@ from .report import BLOCK, WARN, AuditReport
 
 
 def _read_path(p: str) -> pd.DataFrame:
+    """读文件。缺可选依赖时给【能照做的】提示，而不是抛 ImportError。
+
+    ★ 我们声称支持 parquet/xlsx，但 pyarrow/openpyxl 都是可选依赖
+    （不想为了读一种格式把体积压给所有用户）。那就必须自己接住
+    缺依赖的情况 —— 否则用户看到的是 pandas 抛的一句
+    "Missing optional dependency 'openpyxl'"，还得自己去猜装什么。
+    """
     f = Path(p)
     if not f.exists():
         raise FileNotFoundError(f"文件不存在：{f}")
-    if f.suffix.lower() in (".parquet", ".pq"):
-        return pd.read_parquet(f)
-    if f.suffix.lower() in (".xlsx", ".xls"):
-        return pd.read_excel(f)
-    return pd.read_csv(f)
+    suf = f.suffix.lower()
+    try:
+        if suf in (".parquet", ".pq"):
+            return pd.read_parquet(f)
+        if suf in (".xlsx", ".xls", ".xlsm"):
+            return pd.read_excel(f)
+        if suf in (".json",):
+            return pd.read_json(f)
+        return pd.read_csv(f)
+    except ImportError as e:
+        pkg = ("pyarrow" if suf in (".parquet", ".pq")
+               else "openpyxl" if suf in (".xlsx", ".xlsm")
+               else "xlrd" if suf == ".xls" else None)
+        if pkg:
+            raise SystemExit(
+                f"读 {f.name} 需要 {pkg}，当前环境没装。\n"
+                f"  装它：pip install {pkg}\n"
+                f"  或者把文件导出成 csv 再传进来（csv 不需要额外依赖）"
+            ) from e
+        raise
+    except Exception as e:
+        raise SystemExit(
+            f"读不了 {f.name}（{type(e).__name__}：{e}）。\n"
+            f"  支持 csv / parquet / xlsx / json；"
+            f"若是编码问题，请另存为 UTF-8 的 csv"
+        ) from e
 
 
 def _clean_series(s: pd.Series) -> pd.Series:
@@ -112,7 +141,9 @@ def audit(*inputs, net=None, benchmark=None, n_trials: int = 1,
     if not det:
         rep.add(BLOCK, "没有输入", "至少给一个：权重表、价格表，或一条净值曲线",
                 "最低门槛是一条净值曲线（date + 一列数值），"
-                "那能审 4 项；权重表 + 价格表能审全部 12 项",
+                f"那能审 {len(cap.available({cap.NAV})[0])} 项；"
+                f"权重表 + 价格表能审 "
+                f"{len(cap.available({cap.W, cap.P, cap.NAV})[0])} 项",
                 section="输入识别")
         return rep
 
@@ -221,7 +252,8 @@ def audit(*inputs, net=None, benchmark=None, n_trials: int = 1,
         rep.add(BLOCK, "没有可用输入",
                 "所有输入都没能识别成权重表/价格表/净值曲线",
                 "最低可用输入是一条【至少 7 个点】的净值曲线"
-                "（date + 一列数值）；权重表 + 价格表能审全部 12 项。"
+                "（date + 一列数值）；权重表 + 价格表能审 "
+                f"{len(cap.available({cap.W, cap.P, cap.NAV})[0])} 项。"
                 "想先看报告长什么样，跑 strategy-audit --demo",
                 section="输入识别")
         return rep
@@ -259,6 +291,13 @@ def audit(*inputs, net=None, benchmark=None, n_trials: int = 1,
     elif rets is not None:
         rep.skip("策略层显著性（全部 4 项）",
                  f"有效收益只有 {len(rets)} 期，至少需要 6 期")
+
+    # ---- 族四：风险身份（放最后：它不问净值对不对，问风险预算编得对不对）----
+    if wm is not None and pm is not None and len(wm.index) >= 3:
+        d, notes = br.residual_breadth_panel(wm, pm)
+        br.check_residual_breadth(d, rep, notes)
+        br.check_breadth_control(d, rep)
+        br.check_breadth_vs_enb(d, rep)
 
     # ★ 一条 finding 都没有时必须解释为什么，不能交一份空报告。
     # 实测：单行表/全 NaN/净值全 0 这三种输入会走到这里 ——
