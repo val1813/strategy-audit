@@ -33,9 +33,15 @@ from .report import BLOCK, OK, WARN, AuditReport
 
 SECTION = "前视与记账"
 
-# 权重与同期收益的截面相关，超过这个值 ⇒ 疑似权重里含当期信息
-W_RET_CORR_WARN = 0.10
-W_RET_CORR_BLOCK = 0.25
+# 权重与同期收益的截面相关。
+# ★ 这两个数是【效应量分级】，不是检出门槛 —— 检出看 t（见 T_SIGNIF）。
+# 实测教训：真实面板上 corr=+0.088 的 vw 前视把毛年化抬了近 4 倍，
+# 用 |corr|≥0.10 当检出门槛会把它放过去。
+W_RET_CORR_WARN = 0.10       # 方差退化时的兜底幅度门槛
+W_RET_CORR_BLOCK = 0.25      # 超过此幅度且显著 ⇒ BLOCK 而非 WARN
+
+# 跨期一致性的显著性门槛（配对 t）
+T_SIGNIF = 2.0
 
 # 滞后一日后收益衰减超过这个比例 ⇒ 结论依赖当日不可得的信息
 LAG_DECAY_WARN = 0.30
@@ -204,11 +210,26 @@ def check_weight_lookahead(wm: pd.DataFrame, pm: pd.DataFrame,
     detail = (f"权重与【同期】收益的截面秩相关平均 {mean_c:+.3f}"
               f"（{len(c)} 期，{frac_pos:.0%} 期为正，{t_s}）")
 
-    # 显著性判定：方差退化时看均值本身与一致率，否则看 t
+    # ★ 判据是【显著性】而不是相关系数的绝对大小。
+    # 真实面板实测（800 只 A 股 / 126 期 / 30 只持仓）：把 cap 换成【下期】
+    # 市值这个教科书级 vw 前视，毛年化从 3.63% 抬到 13.85%（近 4 倍），
+    # 而截面秩相关只有 +0.088 —— 第一版要求 |corr|≥0.10 才报，于是
+    # t=4.15 的铁证被绝对幅度门槛挡在门外，判了 OK。
+    # 30 只持仓上真前视就是「小而一致」，一致性才是证据，幅度只是效应量。
     significant = (abs(mean_c) >= W_RET_CORR_WARN if degenerate
-                   else np.isfinite(t_stat) and abs(t_stat) >= 2)
-    if abs(mean_c) < W_RET_CORR_WARN or not significant:
+                   else np.isfinite(t_stat) and abs(t_stat) >= T_SIGNIF)
+    if not significant:
+        # 不显著时才看幅度：幅度也小 ⇒ 确实没有关联
         rep.add(OK, "权重前视", detail + " —— 无系统性关联", section=SECTION)
+        return
+
+    # 显著为负：权重系统性偏向【跌】的票。那不是前视（前视会偏向涨的），
+    # 更可能是策略本身的构造特征（如逆势加仓），报 OK 但说明白。
+    if mean_c < 0:
+        rep.add(OK, "权重前视",
+                detail + " —— 系统性偏【负】，与前视方向相反"
+                "（前视会让权重偏向当期涨的票）",
+                section=SECTION)
         return
 
     lvl = BLOCK if mean_c > W_RET_CORR_BLOCK else WARN
@@ -216,6 +237,8 @@ def check_weight_lookahead(wm: pd.DataFrame, pm: pd.DataFrame,
             "权重里可能含了本期结果。最常见的成因是市值加权用了"
             "【期末】市值（含当期收益）而非期初市值 —— "
             "涨得多的票因此在本期拿到更大权重。"
+            "★ 幅度小不等于影响小：实测 800 只 A 股面板上 corr 仅 +0.088"
+            "（t=4.15）的 vw 前视，把毛年化从 3.63% 抬到 13.85%。"
             "请确认权重所用的一切输入都截止到调仓日之前",
             section=SECTION)
 
@@ -274,6 +297,39 @@ def check_universe_survivorship(wm: pd.DataFrame, pm: pd.DataFrame,
             f"在末日已不在册 —— 股票池含已退出标的", section=SECTION)
 
 
+def _classify_missing(wm: pd.DataFrame, pm: pd.DataFrame) -> tuple[int, int]:
+    """把「持有但区间末无价格」的事件分成停牌与永久消失两类。
+
+    返回 (n_resume, n_permanent)，单位是【标的-期】事件数。
+
+    判据很朴素但可靠：区间末之后还能看到价格 ⇒ 停牌复牌；再也看不到 ⇒
+    永久消失（疑似退市，仍需权威退市日确认）。面板自己就带着这个答案，
+    第一版却没去问 —— 于是把 100% 的停牌报成了退市记账问题。
+    """
+    wm, pm = align(wm, pm)
+    dates = list(wm.index)
+    # 每只标的最后一个可见价格的日期
+    last_seen = {}
+    for c in pm.columns:
+        s = pm[c].dropna()
+        last_seen[c] = s.index.max() if len(s) else None
+
+    n_resume = n_perm = 0
+    for t0, t1 in zip(dates[:-1], dates[1:]):
+        if t1 not in pm.index:
+            continue
+        w = wm.loc[t0]
+        for c in w[w != 0].index:
+            if np.isfinite(pm.loc[t1, c]):
+                continue
+            ls = last_seen.get(c)
+            if ls is not None and ls > t1:
+                n_resume += 1
+            else:
+                n_perm += 1
+    return n_resume, n_perm
+
+
 def check_membership_accounting(wm: pd.DataFrame, pm: pd.DataFrame,
                                 rep: AuditReport) -> dict:
     """④ 成分变动记账：三种缺价政策的净值区间。
@@ -300,12 +356,39 @@ def check_membership_accounting(wm: pd.DataFrame, pm: pd.DataFrame,
                 section=SECTION)
         return out
 
+    # ★ 必须区分【停牌】与【退市】，面板自己就知道答案：区间末缺价、
+    # 但之后又出现价格 ⇒ 那是停牌复牌，根本没有退市记账问题。
+    # 真实 A 股面板实测（800 只 / 126 期）：24 个缺价标的-期事件
+    # **100% 都是停牌**，无一永久消失。第一版把它们全报成
+    # 「记账政策决定结论」并给 BLOCK —— 客户会去修一个不存在的退市问题，
+    # 然后对后续所有告警都不再相信（factor-audit 把复牌报成复权错误的同一个坑）。
+    n_resume, n_perm = _classify_missing(wm, pm)
+    rep.stats["n_missing_resume"] = n_resume
+    rep.stats["n_missing_permanent"] = n_perm
+
     lo, hi = min(out.values()), max(out.values())
     spread = hi - lo
     detail = (f"{n_ev} 期出现「持有但无价格」（单期最多占权重 {w_miss:.1%}）。"
               f"三种记账政策的累计收益：\n"
               f"无损移除 {out['drop']:+.2%} / 持有最后价 {out['hold_last']:+.2%}"
               f" / 全额清算 {out['zero']:+.2%}")
+
+    if n_perm == 0 and n_resume > 0:
+        # 全是停牌 ⇒ 这不是退市记账问题，但仍要说清停牌本身的影响
+        rep.add(WARN, "缺价全是停牌，不是退市",
+                detail + f"\n{n_resume} 个缺价标的-期事件【全部】在之后恢复交易，"
+                f"无一永久消失 ⇒ 这不是退市记账问题",
+                "所以上面的政策跨度【不适用】——「全额清算」在停牌上是错的记账"
+                "（停牌股会复牌，不该记 −100%）。真正的问题是停牌期间的持仓"
+                "无法调整也无法成交：请确认回测在停牌日没有假设可交易，"
+                "并按复牌价而非停牌前价格结算",
+                section=SECTION)
+        return out
+
+    if n_resume > 0:
+        detail += (f"\n其中 {n_resume} 个标的-期事件之后恢复交易（停牌），"
+                   f"仅 {n_perm} 个永久消失（疑似退市）")
+
     lvl = (BLOCK if spread > POLICY_SPREAD_BLOCK else
            WARN if spread > POLICY_SPREAD_WARN else OK)
     if lvl is OK:
