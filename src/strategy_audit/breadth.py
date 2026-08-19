@@ -74,6 +74,12 @@ CTRL_SEED = 20260812
 # 残差波动低估倍数：按残差独立编预算，实际波动是预算的多少倍
 UNDERSTATE_WARN = 2.0
 
+# ne/b 要超出 1 多少才算「实质低估」而非估计噪声。
+# ★ 注数是 126 天窗口上样本协方差的二次型之比，1~2% 的偏离本就在噪声里。
+# 实测两次都栽在这里：demo 报「低估 0.98 倍」（比值 <1，语义上根本没低估）、
+# 真实面板随机组合报「低估 1.01 倍」（纯噪声被写成低估）。
+UNDERSTATE_NOISE = 0.05
+
 # 本账注数落在同规模随机组合抽样分布的哪个分位（越高＝越比对照集中）。
 # ★ 主判据用分位而不用 b/c 硬比值，理由与族三改用置换零分布相同：
 # 硬门槛是刀锋判定。实测 6.5 注 vs 对照 11.8 注（比值 0.55）曾被 0.5 的
@@ -419,19 +425,22 @@ def check_residual_breadth(d: pd.DataFrame, rep: AuditReport,
     if extra:
         detail += "\n" + "\n".join(extra)
 
-    # ★ ratio ≤ 1 时不存在「低估」，不能照着模板报 0.98 倍。
-    # 实测 demo 就打印过「低估 0.98 倍」—— 那是残差比对角线预测还小
-    # （代理噪声或估计误差），语义上等于「没有低估」。倍数只在 >1 时有意义。
-    if ratio > 1.0:
+    # ★ 倍数只在实质大于 1 时才有意义，且要留估计噪声余量。
+    # 实测两次翻车：demo 打印「低估 0.98 倍」（ratio<1，语义上等于没低估）；
+    # 真实面板随机组合打印「低估 1.01 倍」（ratio=1.0，纯估计噪声却写成低估）。
+    # 注数是 126 天窗口上的样本协方差之比，1~2% 的偏离本就在噪声里。
+    if ratio > 1.0 + UNDERSTATE_NOISE:
         impact = (f"按「残差互不相关」编特定风险预算，会把组合残差波动低估 "
                   f"{vol_x:.2f} 倍（真实 w'Σw 是对角线预测的 {ratio:.1f} 倍）。"
                   f"\n★ 这不影响净值对不对，影响的是风险预算和对外披露的"
                   f"分散化程度")
     else:
-        impact = (f"残差注数不低于名义有效持仓数（{b:.1f} vs {ne:.1f}）⇒ "
+        impact = (f"残差注数与名义有效持仓数实质相当（{b:.1f} vs {ne:.1f}，"
+                  f"差异在 {UNDERSTATE_NOISE:.0%} 的估计噪声内）⇒ "
                   f"按残差独立编的特定风险预算【没有】被这本账的残差共动"
                   f"击穿，这一项无需打折")
-    level = WARN if ratio > 1.0 and vol_x >= UNDERSTATE_WARN else OK
+    level = (WARN if ratio > 1.0 + UNDERSTATE_NOISE
+             and vol_x >= UNDERSTATE_WARN else OK)
     rep.add(level, "残差有效注数", detail, impact, section=SECTION)
 
 
@@ -477,8 +486,10 @@ def check_breadth_control(d: pd.DataFrame, rep: AuditReport) -> None:
         # 「低于 100% 的同规模随机组合」—— 真实面板上 pct=1.0 时那句话
         # 读起来像「比所有组合都低，包括它自己」，是自相矛盾的。
         # 20 次抽样只能分辨到 1/20，所以 1.0 要报成「全部 20 次」。
-        detail += (f"\n本账注数比 {pct:.0%} 的同规模随机组合更集中"
-                   f"（{N_CTRL_DRAWS} 次抽样，各调仓日分位的中位数）")
+        where = (f"比全部 {N_CTRL_DRAWS} 次抽样都更集中"
+                 if pct >= 1.0 - 1e-9 else
+                 f"比 {pct:.0%} 的同规模随机组合更集中")
+        detail += f"\n本账注数{where}（{N_CTRL_DRAWS} 次抽样，各调仓日分位的中位数）"
 
     if (np.isfinite(pct) and pct >= CTRL_PCTILE_WARN) or r < CTRL_RATIO_WARN:
         if np.isfinite(pct):
@@ -496,11 +507,14 @@ def check_breadth_control(d: pd.DataFrame, rep: AuditReport) -> None:
     else:
         # ★ 不能无条件写「绝对低估倍数仍然成立」——上一项可能报的是
         # 「没有低估」。两项的口径必须对得上，否则报告自相矛盾。
-        tail = ("上一项报的绝对低估倍数仍然成立，只是"
-                if rep.stats.get("breadth_vol_understate_x", 0) >= 1.0
-                and rep.stats.get("breadth_ne_nominal", 0) >
-                rep.stats.get("breadth_residual", 0)
-                else "")
+        # 判据必须与上一项【同一条】：那边用 ne/b > 1+UNDERSTATE_NOISE 才算
+        # 实质低估。这里若只判 >= 1.0，纯估计噪声也会让这句话出现，
+        # 于是报告①说「无需打折」、②说「低估倍数仍然成立」——自相矛盾。
+        _ne = rep.stats.get("breadth_ne_nominal", np.nan)
+        _b = rep.stats.get("breadth_residual", np.nan)
+        _substantive = (np.isfinite(_ne) and np.isfinite(_b) and _b > 0
+                        and _ne / _b > 1.0 + UNDERSTATE_NOISE)
+        tail = "上一项报的绝对低估倍数仍然成立，只是" if _substantive else ""
         rep.add(OK, "同规模对照", detail,
                 f"本账注数是同规模随机组合的 {r:.0%}"
                 + (f"、落在 {pct:.0%} 分位" if np.isfinite(pct) else "")

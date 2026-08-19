@@ -28,12 +28,12 @@ import pandas as pd
 # 只放【实际见过】的写法，不做无边界的猜测。
 # 中文列名必须支持：国内用户的导出表大量使用中文表头。
 ALIASES = {
-    "date": ("date", "trade_date", "tradedate", "datetime", "dt", "day",
+    "date": ("date", "trade_date", "tradedate", "datetime", "dt", "day", "time",
              "时间", "日期", "交易日", "交易日期", "调仓日", "调仓日期"),
     "code": ("code", "symbol", "ticker", "sid", "secid", "sec_id", "instrument",
-             "stock", "stock_code", "asset", "permno", "wind_code", "ts_code",
+             "stock", "stock_code", "asset", "security", "permno", "wind_code", "ts_code",
              "代码", "股票", "股票代码", "证券代码", "标的", "合约"),
-    "weight": ("weight", "w", "wgt", "target_weight", "position", "pos",
+    "weight": ("weight", "w", "wgt", "target_weight", "target_w", "pos",
                "holding", "alloc", "allocation",
                "权重", "目标权重", "持仓", "仓位", "配置"),
     "close": ("close", "close_price", "closeprice", "px", "price", "prc",
@@ -45,6 +45,11 @@ ALIASES = {
     "ret": ("ret", "return", "returns", "rtn", "r", "pnl", "profit",
             "period_return", "daily_return", "chg", "pct_chg", "pct_change",
             "收益", "收益率", "回报", "涨跌幅", "日收益", "期间收益"),
+    # 成交额（族五容量用）。★ 与成交量(vol/股数)区分：这里要的是【金额】。
+    # 名字带 vol 的列在真实数据里既可能是成交量也可能是波动率，太危险，不收。
+    "amount": ("amount", "amt", "turnover_value", "dollar_volume", "dollarvol",
+               "value_traded", "traded_value", "money", "notional",
+               "成交额", "成交金额", "交易额", "金额"),
     "cap": ("cap", "mktcap", "market_cap", "marketcap", "mv", "size",
             "float_cap", "circ_mv", "total_mv",
             "市值", "总市值", "流通市值"),
@@ -202,6 +207,13 @@ def detect_frame(df: pd.DataFrame, source: str = "") -> Detected:
         c_p = match_column(cols, "close")
         c_cap = match_column(cols, "cap")
 
+        # 平台持仓快照常把【股数/市值】叫 position。即使其数值恰好每期
+        # 加总为 1，也不能静默猜成目标权重；须由导出端明确命名 target_weight。
+        if c_w is not None and _norm(c_w) in ("position", "positions"):
+            return Detected("unknown", layout="long",
+                            notes=[f"列 `{c_w}` 像持仓数量/市值，不是可确认的目标权重；"
+                                   "请导出 target_weight/weight"], source=source)
+
         out = d.rename(columns={c_date: "date", c_code: "code"})
         colmap = {"date": c_date, "code": c_code}
 
@@ -225,6 +237,13 @@ def detect_frame(df: pd.DataFrame, source: str = "") -> Detected:
                 out = out.rename(columns={c_cap: "cap"})
                 colmap["cap"] = c_cap
                 keep.append("cap")
+            # 成交额/成交量：族五（容量与可成交性）要用，有就带上，没有就跳过该族
+            c_amt = match_column(cols, "amount")
+            if c_amt is not None:
+                out = out.rename(columns={c_amt: "amount"})
+                colmap["amount"] = c_amt
+                keep.append("amount")
+                notes.append(f"额外带上成交额：{c_amt} → amount（可审容量）")
             notes.append(f"长表，识别为【价格】：{c_p} → close")
             return Detected("prices", frame=out[keep], layout="long",
                             columns=colmap, notes=notes, source=source)

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from strategy_audit import audit_strategy, core, lookahead as la
 from strategy_audit.report import AuditReport
@@ -155,18 +156,24 @@ def test_readme_capability_counts():
     assert f"**{n_nav} 项**" in readme, f"README 未写 {n_nav} 项(只有净值)"
     assert f"**{n_wp} 项**" in readme, f"README 未写 {n_wp} 项(权重+价格)"
     assert f"**{n_all} 项**" in readme, f"README 未写 {n_all} 项(全部)"
-    assert f"{n_all - n_wp} 项（毛净对账要净收益）" in readme
+    assert f"{n_all - n_wp} 项（缺可选输入）" in readme
 
 
 def test_readme_demo_capability_claim():
-    """--demo 报的「能审 N/M 项」必须是真的，且缺的那几项都只缺净收益。"""
+    """--demo 报的「能审 N/M 项」必须是真的，缺的那几项都只缺可选输入。"""
     from strategy_audit.cli import _demo_inputs
     from strategy_audit import audit, capability as cap
     w, p = _demo_inputs()
     rep = audit(w, p, show_detection=False)
-    ok, no = cap.available(set(rep.stats["capability"]))
+    have = set(rep.stats["capability"])
+    ok, no = cap.available(have)
     assert len(ok) == len(cap.CHECKS) - len(no)
-    assert all(cap.NET in c.needs for c in no)
+    # ★ 从 CHECKS 推导，不写死具体是哪个可选输入（族五加了成交额列时
+    # 写死 cap.NET 的版本就红了，而它跟族五无关）
+    optional = {cap.NET, cap.BENCH, cap.AMT, cap.OWN_NAV}
+    for c in no:
+        lack = set(c.needs) - have
+        assert lack and lack <= optional, (c.key, lack)
 
 
 # ---------------- 六个「工具自己被抓到的错」 ----------------
@@ -239,6 +246,96 @@ def test_readme_sharpe_se_agreement_claim():
         t_nw = sg.newey_west_t(r.values, 0)
         worst = max(worst, abs(sr / se - t_nw) / abs(t_nw))
     assert worst <= 0.013, f"实测最大差异 {worst:.2%}，README 写 ≤1.3%"
+
+
+# ---------------- 族六：处方层的三条 README 主张 ----------------
+
+def test_readme_identity_drift_claim():
+    """族六「身份必须钉住」那张表：不分类削预算会把组合换掉。
+
+    README 用真实面板的数字（φ=0.4 时最大权重 95.7%、注数 1.5、
+    名单重合 1%）。这里在合成面板上复现【同一个机制】：
+    按 |Δw| 排序削预算 ⇒ 名单重合崩塌；分类后 ⇒ 恒为 100%。
+    """
+    import numpy as np
+    from strategy_audit import prescribe as pr
+    from synth import make_prices, month_ends, tilted_weight
+
+    p = make_prices(n_codes=60, seed=5)
+    reb = month_ends(p)
+    wm = tilted_weight(p, reb, k=12)
+
+    # 分类版（当前实现）：名单重合恒 100%
+    for phi in (0.6, 0.4, 0.2):
+        assert pr.identity_controlled_path(wm, p, phi)["overlap"] == \
+            pytest.approx(1.0, abs=1e-9), phi
+
+    # 不分类版（第一版的做法）：名单重合会崩
+    from strategy_audit.core import _seg_gross, align, drift_weights
+    wmA, pmA = align(wm, p)
+    dates = list(wmA.index)
+    hold = wmA.loc[dates[0]].copy()
+    ovs = []
+    for cur, nxt in zip(dates[:-1], dates[1:]):
+        g = _seg_gross(pmA, cur, nxt)
+        drift = drift_weights(hold, g)
+        tgt = wmA.loc[nxt]
+        dw = tgt - drift
+        limit, used = 0.4 * float(dw.abs().sum()), 0.0
+        new = drift.copy()
+        for c, v in dw.abs().sort_values(ascending=False).items():
+            if used + v > limit:
+                break
+            new[c] = tgt[c]
+            used += v
+        gr = float(new.abs().sum())
+        new = new / gr if gr > 0 else new
+        nz = new[new.abs() > 1e-12]
+        tn = tgt[tgt.abs() > 1e-12].index
+        ovs.append(len(set(nz.index) & set(tn)) / max(len(tn), 1))
+        hold = new
+    assert float(np.mean(ovs)) < 0.90, (
+        f"不分类削预算的名单重合 {np.mean(ovs):.0%} —— "
+        "README 声称它会崩塌，若没崩就是这条主张站不住了")
+
+
+def test_readme_tweak_share_gap_claim():
+    """族六「7% 与 88% 之间没有任何形态」：门槛落在空档里。"""
+    import numpy as np
+    from strategy_audit import prescribe as pr
+    from synth import equal_weight, make_prices, month_ends
+    readme = _readme()
+    assert f"微调占换手 ≥ {pr.TWEAK_SHARE_FLOOR:.0%}" in readme
+
+    p = make_prices(n_codes=60, seed=5)
+    reb = month_ends(p)
+    churny = pr.split_turnover(equal_weight(p, reb, k=12), p)["share"]
+    codes = sorted(p.columns[p.loc[reb[-1]].notna()])[:12]
+    w = np.linspace(0.16, 0.02, len(codes))
+    fixed = pd.DataFrame([w / w.sum()] * len(reb),
+                         index=pd.DatetimeIndex(reb), columns=codes)
+    tweaky = pr.split_turnover(
+        fixed.reindex(columns=sorted(p.columns), fill_value=0.0), p)["share"]
+    # 两类形态必须被门槛分开，且各自离门槛都有余量
+    assert churny < pr.TWEAK_SHARE_FLOOR - 0.10 < \
+        pr.TWEAK_SHARE_FLOOR + 0.10 < tweaky, (churny, tweaky)
+
+
+def test_readme_documents_every_family():
+    """★ 每一族都必须在 README 里有小节 —— 加了族却不写文档等于藏起来。
+
+    ★ 族数从 CHECKS 推导，不写死「六族」：实测加族七时这个测试
+    因为硬编码了「## 六族检查」而失败，而它本该只关心「都写了没」。
+    """
+    from strategy_audit import capability as cap
+    readme = _readme()
+    secs = {c.section for c in cap.CHECKS}
+    # 标题里的族数必须与实际族数一致（输入契约不算一族）
+    n_fam = len(secs - {"输入契约"})
+    zh = "一二三四五六七八九十"[n_fam - 1] if n_fam <= 10 else str(n_fam)
+    assert f"## {zh}族检查" in readme, f"README 标题没写 {n_fam} 族"
+    for sec in secs:
+        assert sec in readme, f"README 没有介绍「{sec}」这一族"
 
 
 def _readme():

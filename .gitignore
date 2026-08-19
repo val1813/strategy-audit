@@ -5,4 +5,14 @@ build/
 dist/
 .pytest_cache/
 data/
-_retired/
+# 退休的试验大多不入库；但已否决的前视探针是决策记录，必须随版本保留。
+_retired/*
+!_retired/probes_lookahead/
+!_retired/probes_lookahead/_probe_holding_decay.py
+_blind/*.csv
+
+# 本次修复/验收的过程材料不属于发布包。
+修复/
+SPEC_修复与优化_20260818.md
+验收_strategy-audit_20260818.md
+repro_audit_defects.py

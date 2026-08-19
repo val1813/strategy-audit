@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "strategy-audit"
-version = "0.1.0"
-description = "Audit backtest-to-NAV defects: understated turnover, lookahead in weights and universe, and index-membership accounting."
+version = "0.3.0"
+description = "Audit backtest-to-NAV defects: NAV reconciliation, understated turnover, lookahead in weights and universe, membership accounting, capacity, and gated no-forecast prescriptions."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }

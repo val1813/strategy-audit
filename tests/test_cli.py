@@ -134,6 +134,15 @@ def test_cli_trials_flag_changes_discount(files, capsys):
     assert "50 个配置" in out
 
 
+def test_cli_exposes_explicit_net_and_benchmark_roles(capsys):
+    """文件用户也必须能传无法自动猜角色的净收益与基准。"""
+    with pytest.raises(SystemExit) as exc:
+        main(["--help"])
+    out = capsys.readouterr().out
+    assert exc.value.code == 0
+    assert "--net" in out and "--benchmark" in out
+
+
 def test_cli_name_appears_in_report(files, capsys):
     wp, pp, _ = files
     main([wp, pp, "--name", "我的策略X"])

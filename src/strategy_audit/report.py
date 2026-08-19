@@ -14,6 +14,7 @@ detail/impact 两行结构），这样两个工具的报告读起来是一套。
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 BLOCK = "BLOCK"      # 净值不可信，必须先修
@@ -31,6 +32,8 @@ class Finding:
     detail: str
     impact: str = ""
     section: str = ""
+    # 对应 capability.CHECKS 的 key；输入识别/契约等非审计项保留空串。
+    key: str = ""
 
 
 @dataclass
@@ -42,9 +45,25 @@ class AuditReport:
     skipped: list[str] = field(default_factory=list)
     # 能力矩阵文本（capability.matrix_text 的结果），打在报告最前面
     capability: str = ""
+    _active_key: str = field(default="", init=False, repr=False)
 
-    def add(self, level, name, detail, impact="", section=""):
-        self.findings.append(Finding(level, name, detail, impact, section))
+    def add(self, level, name, detail, impact="", section="", key=""):
+        self.findings.append(Finding(level, name, detail, impact, section,
+                                     key or self._active_key))
+
+    @contextmanager
+    def check(self, key: str):
+        """给一次正式检查产生的 finding 标上 capability key。
+
+        key 由顶层调度设定，检查函数本身无需散落重复的字符串；这让
+        「矩阵声明不可用的检查绝不产生 finding」可以做全量断言。
+        """
+        previous = self._active_key
+        self._active_key = key
+        try:
+            yield
+        finally:
+            self._active_key = previous
 
     def skip(self, name: str, why: str) -> None:
         """★ 跳过必须显式记录。

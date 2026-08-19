@@ -209,8 +209,13 @@ def check_breakeven(rets: pd.Series, to: pd.DataFrame, ppy: float,
 
     lvl = (BLOCK if be < BE_BLOCK_BP else
            WARN if be < BE_WARN_BP else OK)
-    t_ann = float(to["drift_adj"].reindex(pd.Series(rets).index)
-                  .fillna(to["naive"].mean()).mean()) * ppy
+    # 换手只发生在调仓日。这里是给用户解释量级，不能像 breakeven_cost()
+    # 那样对齐收益日并填均值；后者填 0 是正确的成本记账，这里填均值则会
+    # 把「每月一次」伪造成「每天一次」。年化频率也必须是调仓频率。
+    t_per = float(to["drift_adj"].mean())
+    if not np.isfinite(t_per):
+        t_per = float(to["naive"].mean())
+    t_ann = t_per * periods_per_year(to.index)
     detail = (f"单边成本需低于 {_fmt_bp(be)} 才有正超额"
               f"（毛年化 {ann_s}{vs}，年化单边换手 {t_ann:.1f}x）")
     if lvl is OK:

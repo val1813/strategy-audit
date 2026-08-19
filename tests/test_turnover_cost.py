@@ -114,6 +114,21 @@ def test_breakeven_uses_benchmark_as_excess(px, wm_clean):
     assert exc_be < abs_be
 
 
+def test_breakeven_detail_annualizes_turnover_at_rebalance_frequency():
+    """月频换手不可铺满日频收益日后再年化。"""
+    idx = pd.date_range("2020-01-31", periods=13, freq="ME")
+    to = pd.DataFrame({"naive": [0.5] * len(idx),
+                       "drift_adj": [0.5] * len(idx)}, index=idx)
+    rets = pd.Series(0.01, index=pd.bdate_range("2020-01-01", "2021-01-31"))
+    rep = AuditReport()
+    tc.check_breakeven(rets, to, core.periods_per_year(rets.index), rep)
+    finding = next(f for f in rep.findings if "盈亏平衡" in f.name)
+    expected = 0.5 * core.periods_per_year(idx)
+    assert f"年化单边换手 {expected:.1f}x" in finding.detail
+    # 若错误地把月频换手铺满收益日，会接近 0.5 × 252，而不是约 6x。
+    assert expected < 10.0
+
+
 # ---------------- ④ 毛净对账 ----------------
 
 def test_gross_net_reconcile_recovers_planted_fee(px, wm_clean):

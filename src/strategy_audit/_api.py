@@ -25,11 +25,16 @@ import pandas as pd
 
 from . import breadth as br
 from . import capability as cap
+from . import capacity as cp
 from . import lookahead as la
+from . import navquality as nq
+from . import prescribe as px
 from . import significance as sg
 from . import turnover_cost as tc
-from .contract import check_gross, load_prices, load_weights, normalize_gross, to_matrix
+from .contract import (check_gross, check_nav_reconciliation, load_prices,
+                       load_weights, normalize_gross, to_matrix)
 from .core import period_returns, periods_per_year, price_matrix
+from .core import turnover as core_turnover
 from .detect import Detected, detect_all, detect_frame
 from .report import BLOCK, WARN, AuditReport
 
@@ -87,6 +92,31 @@ def _clean_series(s: pd.Series) -> pd.Series:
     if len(v) and v.index.has_duplicates:
         v = v[~v.index.duplicated(keep="last")]
     return v
+
+
+def _warn_daily_gap(index, rep: AuditReport) -> None:
+    """日频输入有异常缺口时，禁止把缺失观察静默当作较低频率。
+
+    不能直接看日历天：A 股春节/国庆前后的正常相邻交易日可相隔 11 天。
+    改看中间跳过的工作日；节假日最多造成少量工作日缺口，下载遗漏数周或
+    数月则会显著更大。这里仍只是数据完整性提示，不假装有交易所日历。
+    """
+    d = pd.DatetimeIndex(pd.to_datetime(pd.Index(index))).sort_values()
+    if len(d) < 3:
+        return
+    gaps = pd.Series(d).diff().dt.days.dropna()
+    if gaps.empty or float(gaps.median()) > 4:
+        return
+    skipped = [(len(pd.bdate_range(left, right)) - 2, left, right)
+               for left, right in zip(d[:-1], d[1:])]
+    longest, left, right = max(skipped, key=lambda x: x[0])
+    if longest > 10:
+        rep.add(WARN, "日频序列存在长缺口",
+                f"{left.date()} ~ {right.date()} 之间跳过 {longest} 个工作日",
+                "年化按已观测日期估算；这不是把缺失期间当作零收益。"
+                "请确认该缺口是正常停市还是行情/净值下载不完整，"
+                "否则年化收益、波动和 Sharpe 都不应直接比较",
+                section="输入识别")
 
 
 def _as_series(o) -> pd.Series | None:
@@ -210,6 +240,13 @@ def audit(*inputs, net=None, benchmark=None, n_trials: int = 1,
     if bench is not None:
         have.add(cap.BENCH)
 
+    # 成交额列（族五容量用）。识别层会把 amount 一起带进价格表。
+    am = cp.amount_matrix(prices) if prices is not None else None
+    if am is not None and am.notna().any().any():
+        have.add(cap.AMT)
+    else:
+        am = None
+
     # 有权重+价格就能自己算出收益曲线 ⇒ 族三也能跑
     rets = None
     ppy = None
@@ -217,7 +254,28 @@ def audit(*inputs, net=None, benchmark=None, n_trials: int = 1,
         pr = period_returns(wm, pm)
         rets = pr["ret"]
         ppy = periods_per_year(wm.index)
+        _warn_daily_gap(pm.index, rep)
         have.add(cap.NAV)
+        # ★ 同时给了自报净值时【必须对账】，不能静默丢弃。
+        # 第一版这里是 elif：权重+价格在手就自己重算，客户交上来的那条
+        # 曲线连看一眼都没有。盲测实测两条差 6.0%（自报 6.19% / 重算 6.66%，
+        # 原因是月内日频再平衡，权重表里看不出来）—— 于是所有检查
+        # 都算在一条【客户从未汇报过】的净值上，而报告照样打印得像模像样。
+        # 本工具宣称审的就是「回测到净值这一段」，那这一项就是它的本职。
+        if nav is not None:
+            own, own_role = nav
+            have.add(cap.OWN_NAV)
+            # 换手在这里先算一次传进去：良性方向（自报低于重算）要把缺口
+            # 折算成隐含成本才能判断「像不像扣了成本」。族一稍后会再算一次
+            # 并报口径对比 —— 这里只借用数值，不出结论。
+            try:
+                _to = float(core_turnover(wm, pm)["drift_adj"].mean())
+            except Exception:
+                _to = None
+            if cap.can_run("nav_recon", have):
+                with rep.check("nav_recon"):
+                    check_nav_reconciliation(rets, _clean_series(own), own_role, rep,
+                                             turnover=_to)
     elif nav is not None:
         s, role = nav
         n_raw = len(s)
@@ -231,6 +289,7 @@ def audit(*inputs, net=None, benchmark=None, n_trials: int = 1,
                     section="输入识别")
         rets = _clean_series(sg.to_returns(s, role))
         ppy = periods_per_year(rets.index) if len(rets) > 2 else 252.0
+        _warn_daily_gap(rets.index, rep)
         have.add(cap.NAV)
 
     rep.stats["capability"] = sorted(have)
@@ -265,29 +324,70 @@ def audit(*inputs, net=None, benchmark=None, n_trials: int = 1,
                     "至少 3 期才能算换手；多数检查需要 6~7 期",
                     section="输入契约")
         else:
-            la.check_rebalance_alignment(wm, pm, rep)
-            la.check_weight_lookahead(wm, pm, rep)
-            la.check_universe_survivorship(wm, pm, rep)
-            la.check_membership_accounting(wm, pm, rep)
+            for key, fn in (
+                    ("day0", la.check_rebalance_alignment),
+                    ("w_look", la.check_weight_lookahead),
+                    ("univ", la.check_universe_survivorship),
+                    ("member", la.check_membership_accounting)):
+                if cap.can_run(key, have):
+                    with rep.check(key):
+                        fn(wm, pm, rep)
 
     # ---- 族一：换手与成本 ----
     if wm is not None and len(wm.index) >= 3:
-        to = tc.check_turnover_basis(wm, pm, rep) if pm is not None else None
+        if cap.can_run("to_basis", have):
+            with rep.check("to_basis"):
+                to = tc.check_turnover_basis(wm, pm, rep)
+        else:
+            to = None
         if to is None:
             from .core import turnover
             to = turnover(wm, None)
-        tc.check_implied_turnover(wm, to, rep)
-        if rets is not None and ppy:
-            tc.check_breakeven(rets, to, ppy, rep, bench=bench)
-            if net is not None:
+        if cap.can_run("to_implied", have):
+            with rep.check("to_implied"):
+                tc.check_implied_turnover(wm, to, rep)
+        if cap.can_run("breakeven", have) and rets is not None and ppy:
+            with rep.check("breakeven"):
+                tc.check_breakeven(rets, to, ppy, rep, bench=bench)
+        if cap.can_run("reconcile", have) and rets is not None and net is not None:
+            with rep.check("reconcile"):
                 tc.check_gross_net_reconcile(rets, net, to, rep)
+
+    # ---- 族七：净值质量（只要曲线）----
+    # ★ 排在族三之前：族三审「这个数字可不可信」，但它默认曲线本身是真的；
+    # 族七审的正是那个前提。曲线被平滑过时，再精确的显著性检验
+    # 也只是把一个被低估的波动算得更精确。
+    if rets is not None and len(rets) >= nq.MIN_N:
+        if cap.can_run("smoothing", have):
+            with rep.check("smoothing"):
+                nq.check_smoothing(rets, ppy or 252.0, rep)
+        # 停滞估值要看【原始序列】：自报净值时用净值本身（相邻点是否相等），
+        # 只有收益率时退回收益率。重算出来的收益曲线传 role="ret"。
+        if cap.can_run("stale_nav", have):
+            with rep.check("stale_nav"):
+                if nav is not None:
+                    _own, _role = nav
+                    nq.check_stale(_clean_series(_own), _role, rep)
+                else:
+                    nq.check_stale(rets, "ret", rep)
+        if cap.can_run("dressing", have):
+            with rep.check("dressing"):
+                nq.check_period_end_dressing(rets, rep)
+    elif rets is not None:
+        rep.skip("净值质量（全部 3 项）",
+                 f"序列只有 {len(rets)} 个点（需要 ≥{nq.MIN_N}）")
 
     # ---- 族三：策略层显著性（只要曲线）----
     if rets is not None and len(rets) >= 6:
-        sg.check_year_concentration(rets, rep, bench=bench)
-        sg.check_nw_lag_sensitivity(rets, rep)
-        sg.check_deflated_sharpe(rets, ppy or 252.0, rep, n_trials=n_trials)
-        sg.check_drawdown(rets, rep)
+        for key, fn in (
+                ("year_conc", lambda: sg.check_year_concentration(rets, rep, bench=bench)),
+                ("nw_lag", lambda: sg.check_nw_lag_sensitivity(rets, rep)),
+                ("dsr", lambda: sg.check_deflated_sharpe(rets, ppy or 252.0, rep,
+                                                          n_trials=n_trials)),
+                ("drawdown", lambda: sg.check_drawdown(rets, rep))):
+            if cap.can_run(key, have):
+                with rep.check(key):
+                    fn()
     elif rets is not None:
         rep.skip("策略层显著性（全部 4 项）",
                  f"有效收益只有 {len(rets)} 期，至少需要 6 期")
@@ -295,9 +395,41 @@ def audit(*inputs, net=None, benchmark=None, n_trials: int = 1,
     # ---- 族四：风险身份（放最后：它不问净值对不对，问风险预算编得对不对）----
     if wm is not None and pm is not None and len(wm.index) >= 3:
         d, notes = br.residual_breadth_panel(wm, pm)
-        br.check_residual_breadth(d, rep, notes)
-        br.check_breadth_control(d, rep)
-        br.check_breadth_vs_enb(d, rep)
+        for key, fn in (
+                ("breadth", lambda: br.check_residual_breadth(d, rep, notes)),
+                ("breadth_ctrl", lambda: br.check_breadth_control(d, rep)),
+                ("breadth_enb", lambda: br.check_breadth_vs_enb(d, rep))):
+            if cap.can_run(key, have):
+                with rep.check(key):
+                    fn()
+
+    # ---- 族五：容量与可成交性（这些收益你到底拿不拿得到）----
+    if wm is not None and pm is not None and len(wm.index) >= 3:
+        if cap.can_run("untradable", have):
+            with rep.check("untradable"):
+                cp.check_untradable(wm, pm, rep)
+        if cap.can_run("capacity", have):
+            with rep.check("capacity"):
+                cp.check_capacity(wm, am, rep, pm=pm)
+        if cap.can_run("liq_tilt", have):
+            with rep.check("liq_tilt"):
+                cp.check_liquidity_tilt(wm, am, pm, rep)
+        if cap.can_run("size_decay", have) and rets is not None and ppy:
+            with rep.check("size_decay"):
+                cp.check_size_decay(rets, wm, am, ppy, rep)
+
+    # ---- 族六：处方层（放最末：只有前五族问过「可不可信」之后，
+    # 才轮到「怎么改」。给一份不可信的净值出处方是没有意义的）----
+    if wm is not None and pm is not None and len(wm.index) >= 3:
+        if cap.can_run("to_value", have):
+            with rep.check("to_value"):
+                px.check_turnover_value(wm, pm, rep)
+        if cap.can_run("to_split", have):
+            with rep.check("to_split"):
+                px.check_turnover_split(wm, pm, rep)
+        if cap.can_run("prescribe", have) and ppy:
+            with rep.check("prescribe"):
+                px.check_prescription(wm, pm, ppy, rep)
 
     # ★ 一条 finding 都没有时必须解释为什么，不能交一份空报告。
     # 实测：单行表/全 NaN/净值全 0 这三种输入会走到这里 ——

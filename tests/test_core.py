@@ -203,3 +203,14 @@ def test_periods_per_year_monthly(px):
     """月频调仓 ⇒ 每年约 12 期。"""
     ppy = core.periods_per_year(month_ends(px))
     assert 11.0 < ppy < 13.5, ppy
+
+
+@pytest.mark.parametrize("idx,want,tol", [
+    (pd.bdate_range("2020-01-02", periods=11), 252.0, 12.0),
+    (pd.date_range("2020-01-31", periods=11, freq="ME"), 12.0, 0.3),
+    (pd.date_range("2020-01-03", periods=200, freq="W-FRI"), 52.2, 0.3),
+    (pd.date_range("2020-01-01", periods=1000, freq="D"), 365.25, 0.1),
+])
+def test_periods_per_year_respects_observation_frequency(idx, want, tol):
+    """日频交易序列扣周末；低频与 7x24 日频维持正确的原有口径。"""
+    assert abs(core.periods_per_year(idx) - want) < tol

@@ -77,7 +77,23 @@ from .turnover_cost import (
     check_turnover_basis,
 )
 
-__version__ = "0.1.0"
+# ★ 版本号只在 pyproject.toml 里写一次，这里从包元数据读。
+# 写两遍必然漂移：实测 pyproject 已经 0.2.0，而这里还是 0.1.0 ——
+# 装完包的用户 import 出来看到的就是错的版本号。
+# 源码树里跑（没装包）时退回读 pyproject，保证 dev 环境也对。
+try:                                            # pragma: no cover
+    from importlib.metadata import PackageNotFoundError, version as _pkg_version
+    try:
+        __version__ = _pkg_version("strategy-audit")
+    except PackageNotFoundError:
+        import pathlib
+        import re
+        _pp = pathlib.Path(__file__).resolve().parents[2] / "pyproject.toml"
+        _m = re.search(r'^version\s*=\s*"([^"]+)"', _pp.read_text(
+            encoding="utf-8"), re.M) if _pp.exists() else None
+        __version__ = _m.group(1) if _m else "0+unknown"
+except Exception:                               # pragma: no cover
+    __version__ = "0+unknown"
 
 __all__ = [
     "audit",

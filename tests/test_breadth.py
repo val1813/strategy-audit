@@ -243,3 +243,96 @@ def test_control_percentile_recorded_per_date():
         assert "ctrl_pctile" in d.columns
         v = d["ctrl_pctile"].dropna()
         assert len(v) and v.between(0, 1).all()
+
+
+# ---------------- 报告自洽性（四处措辞 bug 的回归） ----------------
+#
+# ★ 这四个都是【跑起来才看见】的，测试套件当时全绿。
+# 合成面板 + demo + 真实面板各抓到两个，共同点是：数字算对了，
+# 但报告把它叙述成了自相矛盾的话。审计工具的输出就是产品，
+# 措辞错误等于结论错误。
+
+def _mk(n, held_extra=0.0, k=20, seed=5, f_sd=0.015, e_sd=0.015):
+    """按需造面板：held_extra>0 时前 k 只额外共享一个因子（真压缩）。"""
+    rng = np.random.default_rng(seed)
+    dates = pd.bdate_range("2021-01-04", "2023-12-29")
+    R = rng.normal(0, e_sd, (len(dates), n))
+    R += np.outer(rng.normal(0, f_sd, len(dates)), np.ones(n))
+    if held_extra > 0:
+        R[:, :k] += np.outer(rng.normal(0, held_extra, len(dates)), np.ones(k))
+    px = pd.DataFrame(100 * np.exp(np.cumsum(R, axis=0)), index=dates,
+                      columns=[f"{i:06d}.SZ" for i in range(1, n + 1)])
+    rows = [(t, c, 1.0 / k) for t in month_ends(px) for c in px.columns[:k]]
+    wm = (pd.DataFrame(rows, columns=["date", "code", "weight"])
+          .pivot(index="date", columns="code", values="weight")
+          .fillna(0.0).sort_index())
+    return px, wm
+
+
+def _report(px, wm):
+    d, notes = br.residual_breadth_panel(wm, px)
+    rep = AuditReport()
+    br.check_residual_breadth(d, rep, notes)
+    br.check_breadth_control(d, rep)
+    return d, rep
+
+
+def test_no_understatement_claim_when_ratio_is_noise():
+    """★ ratio≈1 时不许写「低估 1.01 倍」。
+
+    实测两次翻车：demo 报「低估 0.98 倍」（比值 <1，语义上根本没低估）、
+    真实面板随机组合报「低估 1.01 倍」（纯估计噪声被叙述成低估）。
+    """
+    px, wm = _mk(260)                     # 干净大池 ⇒ 注数≈持仓数
+    _, rep = _report(px, wm)
+    f = [x for x in rep.findings if x.name == "残差有效注数"][0]
+    ne, b = rep.stats["breadth_ne_nominal"], rep.stats["breadth_residual"]
+    if ne / b <= 1.0 + br.UNDERSTATE_NOISE:
+        assert "低估" not in f.impact, f.impact
+        assert "无需打折" in f.impact
+        assert f.level == OK
+
+
+def test_debiased_breadth_never_exceeds_nominal():
+    """★ 去偏值也受 1/Σw² 硬上界约束。
+
+    去偏是一阶近似，小 complement 且 b 已接近 ne 时会反解出超过持仓数的
+    注数（demo 实测 8 只报 12.9 注）—— 报出去就是自相矛盾。
+    """
+    for n in (30, 60, 120):
+        px, wm = _mk(n)
+        _, rep = _report(px, wm)
+        adj = rep.stats.get("breadth_proxy_adjusted")
+        ne = rep.stats["breadth_ne_nominal"]
+        if adj is not None and np.isfinite(adj):
+            assert adj <= ne + 1e-9, f"池 {n}: 去偏 {adj:.1f} > 名义 {ne:.1f}"
+
+
+def test_full_percentile_is_not_worded_as_a_percentage():
+    """★ pct=1.0 不许写成「低于 100% 的同规模随机组合」。
+
+    真实面板上低波组合就是 pct=1.0，那句话读起来像「比所有组合都低、
+    包括它自己」。20 次抽样只能分辨到 1/20，所以要报成「全部 20 次」。
+    """
+    px, wm = _mk(260, held_extra=0.02)    # 真压缩 ⇒ 分位顶到 1.0
+    _, rep = _report(px, wm)
+    pct = rep.stats.get("breadth_control_pctile")
+    if pct is not None and pct >= 1.0 - 1e-9:
+        f = [x for x in rep.findings if x.name == "同规模对照"][0]
+        assert "100%" not in f.detail and "100%" not in f.impact
+        assert f"全部 {br.N_CTRL_DRAWS} 次" in f.detail
+
+
+def test_two_findings_never_contradict_each_other():
+    """★ ①说「无需打折」时②不许说「低估倍数仍然成立」。
+
+    两项必须用同一条判据（ne/b > 1+UNDERSTATE_NOISE）。②原先只判 >=1.0，
+    于是纯噪声也会让那句话出现。
+    """
+    for n, extra in ((260, 0.0), (60, 0.0), (260, 0.02)):
+        px, wm = _mk(n, held_extra=extra)
+        _, rep = _report(px, wm)
+        f1 = [x for x in rep.findings if x.name == "残差有效注数"][0]
+        f2 = [x for x in rep.findings if x.name == "同规模对照"][0]
+        if "无需打折" in f1.impact:
+            assert "仍然成立" not in f2.impact, (n, extra, f2.impact)

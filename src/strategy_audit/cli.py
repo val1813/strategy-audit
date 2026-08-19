@@ -79,6 +79,10 @@ def main(argv: list[str] | None = None) -> int:
                     help="用内置合成数据演示（不需要你的数据）")
     ap.add_argument("--trials", type=int, default=1, metavar="N",
                     help="你试过多少个配置才选出这一个（用于多重检验折扣）")
+    ap.add_argument("--net", metavar="FILE",
+                    help="净收益/净值文件（用于毛净对账；该角色不能自动猜）")
+    ap.add_argument("--benchmark", metavar="FILE",
+                    help="基准收益/净值文件（盈亏平衡按超额收益计算）")
     ap.add_argument("--name", default="策略审计", help="报告标题")
     ap.add_argument("--quiet-detection", action="store_true",
                     help="不打印输入识别明细（不推荐：识别错了你会看不出来）")
@@ -105,7 +109,8 @@ def main(argv: list[str] | None = None) -> int:
         if not Path(f).exists():
             raise SystemExit(f"文件不存在：{f}")
 
-    rep = audit(*args.files, n_trials=args.trials, name=args.name,
+    rep = audit(*args.files, net=args.net, benchmark=args.benchmark,
+                n_trials=args.trials, name=args.name,
                 show_detection=not args.quiet_detection)
     print(rep.text())
 

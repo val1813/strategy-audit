@@ -60,6 +60,20 @@ def test_chinese_columns_detected(px, wm_clean):
     assert d.columns["weight"] == "目标权重"
 
 
+def test_common_platform_export_aliases_detected(px, wm_clean):
+    """聚宽/BigQuant 风格 time/security/target_weight 直接可用。"""
+    w = to_long(wm_clean, "weight").rename(
+        columns={"date": "time", "code": "security", "weight": "target_weight"})
+    d = detect_frame(w)
+    assert d.kind == "weights"
+
+
+def test_position_quantity_is_not_silently_treated_as_weight(px, wm_clean):
+    """仓位数量常叫 position；它不等于已归一的目标权重。"""
+    w = to_long(wm_clean, "weight").rename(columns={"weight": "position"})
+    assert detect_frame(w).kind == "unknown"
+
+
 def test_integer_dates_parsed(px, wm_clean):
     """20210104 这种整数日期必须能认。"""
     w = to_long(wm_clean, "weight")

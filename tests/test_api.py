@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from strategy_audit import audit_strategy
 from strategy_audit.report import BLOCK, OK, WARN, AuditReport
@@ -227,3 +228,58 @@ def test_capability_matrix_in_report_text(px, wm_clean):
     txt = audit(w, p).text()
     assert "能审" in txt and "审不了" in txt
     assert txt.index("能审") < txt.index("【输入识别】")
+
+
+def test_capability_matches_turnover_execution_without_prices(px, wm_clean):
+    """没有价格时，不得运行矩阵声明为不可用的族一检查。"""
+    from strategy_audit import audit
+    w, _ = _long(px, wm_clean)
+    nav = pd.DataFrame({"date": px.index, "nav": 1.0 + np.arange(len(px)) * 0.001})
+    rep = audit(w, nav)
+    names = {f.name for f in rep.findings}
+    assert not any("盈亏平衡" in name for name in names)
+    assert not any("反推换手" in name for name in names)
+    assert any("盈亏平衡成本" in item for item in rep.skipped)
+    assert any("反推换手偏差" in item for item in rep.skipped)
+
+
+@pytest.mark.parametrize("kind", ("nav", "weights", "prices", "weights_prices"))
+def test_no_declared_unavailable_check_emits_a_key(kind, px, wm_clean):
+    """全部族的调度都必须服从 CHECKS，而非只靠名字匹配的局部测试。"""
+    from strategy_audit import audit, capability as cap
+    w, p = _long(px, wm_clean)
+    nav = pd.DataFrame({"date": px.index,
+                        "nav": (1.0 + np.arange(len(px)) * 0.001)})
+    inputs = {
+        "nav": (nav,), "weights": (w,), "prices": (p,),
+        "weights_prices": (w, p),
+    }[kind]
+    rep = audit(*inputs, show_detection=False)
+    _, no = cap.available(set(rep.stats["capability"]))
+    unavailable = {check.key for check in no}
+    ran = {finding.key for finding in rep.findings if finding.key}
+    assert not ran & unavailable, (kind, ran & unavailable)
+
+
+def test_daily_series_with_a_long_gap_warns_instead_of_looking_low_frequency():
+    """平台下载漏掉数月日线时，年化口径必须提示而非静默降频。"""
+    from strategy_audit import audit
+    idx = pd.bdate_range("2023-01-02", "2023-12-29")
+    idx = idx[~((idx >= "2023-06-01") & (idx <= "2023-08-31"))]
+    nav = pd.DataFrame({"date": idx, "nav": 1.0 + np.arange(len(idx)) * 0.001})
+    rep = audit(nav, show_detection=False)
+    assert any(f.name == "日频序列存在长缺口" for f in rep.warnings)
+
+
+def test_normal_ashare_holiday_gap_does_not_warn():
+    """春节休市跳过 6 个工作日，但不应被误判为下载遗漏。
+
+    用公开假期日期构造，不能依赖被 .gitignore 排除的盲测行情；否则
+    clean checkout 的 CI 会 FileNotFoundError，防误报的闸门实际没跑。
+    """
+    from strategy_audit import audit
+    idx = pd.bdate_range("2019-12-02", "2020-04-01")
+    idx = idx[~((idx >= "2020-01-24") & (idx <= "2020-02-02"))]
+    nav = pd.DataFrame({"date": idx, "nav": 1.0 + np.arange(len(idx)) * 0.001})
+    rep = audit(nav, show_detection=False)
+    assert not any(f.name == "日频序列存在长缺口" for f in rep.warnings)

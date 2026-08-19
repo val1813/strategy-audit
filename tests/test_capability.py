@@ -13,25 +13,43 @@ import pytest
 from strategy_audit import capability as cap
 
 
-def test_nav_only_unlocks_significance_family():
-    """★ 计数从 CHECKS 推导，不写死。
+def test_nav_only_unlocks_curve_only_families():
+    """★ 计数与族名都从 CHECKS 推导，不写死。
 
     新增一族检查时写死的数字会让一堆测试红掉，而那些测试跟新族毫无关系
-    —— 实测加族四(风险身份)时 7 个测试因此失败。
-    该断言的真意是「只有净值时解锁的恰好是族三」，那就直接这么断言。
+    —— 实测加族四（风险身份）时 7 个测试因此失败，加族七（净值质量）
+    时这个测试又因为写死了「恰好是族三」而失败。
+
+    真意是「只有净值时解锁的，恰好是那些只需要净值的检查」——
+    那就直接这么断言，不点名具体是哪几族。
     """
     ok, no = cap.available({cap.NAV})
     nav_only = [c for c in cap.CHECKS if set(c.needs) == {cap.NAV}]
     assert len(ok) == len(nav_only)
-    assert all(c.section == "策略层显著性" for c in ok)
+    assert {c.key for c in ok} == {c.key for c in nav_only}
     assert len(no) == len(cap.CHECKS) - len(ok)
+    # 只要一条曲线就能审的项必须【不止】显著性一族 ——
+    # 族三默认曲线本身是真的，族七审的正是那个前提。
+    assert len({c.section for c in ok}) >= 2, [c.section for c in ok]
 
 
 def test_weights_and_prices_unlock_almost_all():
-    """权重+价格+净值 ⇒ 只剩需要净收益序列的那些审不了。"""
-    ok, no = cap.available({cap.W, cap.P, cap.NAV})
+    """权重+价格+净值 ⇒ 剩下审不了的每一项都【只】缺可选输入。
+
+    ★ 断言必须从 CHECKS 推导，不能写死「只缺 net」。
+    第一版写死了 cap.NET，于是族五（容量）引入成交额列 AMT 之后
+    这个测试红了 —— 而它跟族五毫无关系。真意是「基础输入齐了以后，
+    剩下的都只缺可选输入」，那就直接这么断言。
+    """
+    base = {cap.W, cap.P, cap.NAV}
+    # OWN_NAV 也是可选输入：NAV 可以是工具自己重算的，
+    # 而「客户亲手交上来的那条净值」只有他给了才有。
+    optional = {cap.NET, cap.BENCH, cap.AMT, cap.OWN_NAV}
+    ok, no = cap.available(base)
     assert len(ok) == len(cap.CHECKS) - len(no)
-    assert all(cap.NET in c.needs for c in no), [c.key for c in no]
+    for c in no:
+        lack = set(c.needs) - base
+        assert lack and lack <= optional, (c.key, lack)
     assert "reconcile" in [c.key for c in no]
 
 
@@ -47,14 +65,28 @@ def test_every_check_is_reachable():
     不可达的检查是登记表写错了 —— 它永远不会跑，而能力矩阵会一直
     把它列在「审不了」里，用户永远看不懂要补什么。
     """
-    allkinds = {cap.W, cap.P, cap.NAV, cap.NET, cap.BENCH}
+    # ★ 这里必须用【所有】已声明的输入种类，不能手写清单 ——
+    # 手写清单会在新增输入种类时把「不可达」误报成正常。
+    allkinds = {k for c in cap.CHECKS for k in c.needs}
     ok, no = cap.available(allkinds)
     assert no == [], f"这些检查任何输入都解锁不了：{[c.key for c in no]}"
+    # 每个种类都必须真的被 _LABEL 收录，否则报告会漏出内部键名
+    for k in allkinds:
+        assert cap.label(k) != k, f"{k} 没有人类可读名字"
 
 
 def test_check_keys_unique():
     keys = [c.key for c in cap.CHECKS]
     assert len(keys) == len(set(keys))
+
+
+def test_can_run_uses_the_same_needs_as_the_capability_matrix():
+    """调度判据与矩阵必须同源，避免「运行了却显示审不了」。"""
+    for check in cap.CHECKS:
+        have = set(check.needs)
+        assert cap.can_run(check.key, have)
+        for required in set(check.needs):
+            assert not cap.can_run(check.key, have - {required})
 
 
 def test_missing_value_reports_combo_not_just_single():
@@ -76,7 +108,9 @@ def test_missing_value_sorted_by_payoff():
 
 
 def test_missing_value_empty_when_all_present():
-    assert cap.missing_value({cap.W, cap.P, cap.NAV, cap.NET, cap.BENCH}) == []
+    """什么都给齐了就不该再建议补东西。★ 种类清单从 CHECKS 推导。"""
+    allkinds = {k for c in cap.CHECKS for k in c.needs}
+    assert cap.missing_value(allkinds) == []
 
 
 def test_matrix_text_distinguishes_cannot_from_passed():

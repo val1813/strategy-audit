@@ -221,27 +221,56 @@ def annualize(rets: pd.Series, periods_per_year: float) -> dict:
     r = pd.Series(rets).dropna().astype(float)
     if len(r) < 2:
         return dict(ann_ret=np.nan, ann_vol=np.nan, sharpe=np.nan, n=len(r))
-    total = float((1.0 + r).prod())
     yrs = len(r) / periods_per_year
-    ann_ret = total ** (1.0 / yrs) - 1.0 if yrs > 0 and total > 0 else np.nan
-    sd = float(r.std(ddof=1))
+    gross = 1.0 + r.values
+    # 直接连乘会在 1e300 这类敌意输入上溢出。复利的对数形式等价，
+    # 但能在指数回转前保留有限中间量；最终真实超界时返回 inf，而非
+    # RuntimeWarning 或一个伪造的有限年化收益。
+    if yrs > 0 and np.isfinite(gross).all() and (gross > 0).all():
+        with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+            ann_ret = float(np.expm1(float(np.log(gross).sum()) / yrs))
+    else:
+        ann_ret = np.nan
+
+    # 先按量级缩放再求标准差。``pandas.Series.std`` 会先平方，1e300
+    # 这类敌意输入会溢出并把有效的“不可年化”问题伪装成 Sharpe=0。
+    # 缩放不改变标准差与均值之比，常规收益上的数值也不变。
+    scale_for_sd = float(np.max(np.abs(r.values)))
+    if not np.isfinite(scale_for_sd) or scale_for_sd == 0:
+        sd = 0.0
+    else:
+        sd = float(r.div(scale_for_sd).std(ddof=1)) * scale_for_sd
 
     # ★ 不能只判 sd > 0。恒定收益序列的样本标准差是 ~1e-18 而非精确 0
     # （浮点），于是 `sd > 0` 通过，Sharpe 算出 9.8e15 这种荒谬值。
     # 测试就是这么抓到的。按相对尺度判「实质为零」才对。
-    scale = max(abs(float(r.mean())), 1.0)
+    mean = float(np.mean(r.values / scale_for_sd)) * scale_for_sd \
+        if scale_for_sd else 0.0
+    scale = max(abs(mean), 1.0)
     degenerate = sd <= 1e-12 * scale
 
     ann_vol = 0.0 if degenerate else sd * np.sqrt(periods_per_year)
     sharpe = (np.nan if degenerate
-              else float(r.mean()) / sd * np.sqrt(periods_per_year))
+              else mean / sd * np.sqrt(periods_per_year))
     return dict(ann_ret=ann_ret, ann_vol=ann_vol, sharpe=sharpe, n=len(r))
 
 
 def periods_per_year(dates) -> float:
-    """由调仓日间隔估每年期数。"""
-    d = pd.Series(pd.to_datetime(pd.Index(dates))).sort_values()
+    """由观测日期估计每年期数。
+
+    日频交易序列不能用 ``365.25 / 相邻日历天中位间隔``：交易日的
+    中位间隔通常为一天，因而会把 A 股日频净值误当作一年 365 期。
+    对日频数据用观测数除以日历跨度，既会扣除周末和节假日，也保留
+    7x24 日频资产的一年约 365 期；低频序列沿用间隔法。
+    """
+    d = pd.DatetimeIndex(pd.to_datetime(pd.Index(dates))).sort_values()
     if len(d) < 3:
         return float(TRADING_DAYS)
-    med = float(d.diff().dt.days.dropna().median())
-    return 365.25 / med if med > 0 else float(TRADING_DAYS)
+    gaps = pd.Series(d).diff().dt.days.dropna()
+    med = float(gaps.median())
+    if med <= 0:
+        return float(TRADING_DAYS)
+    if med <= 4:
+        years = (d[-1] - d[0]).days / 365.25
+        return (len(d) - 1) / years if years > 0 else float(TRADING_DAYS)
+    return 365.25 / med
