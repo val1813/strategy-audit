@@ -1,77 +1,83 @@
 # strategy-audit
 
 [![tests](https://github.com/val1813/strategy-audit/actions/workflows/tests.yml/badge.svg)](https://github.com/val1813/strategy-audit/actions/workflows/tests.yml)
+[![python](https://img.shields.io/badge/python-3.9%2B-blue)](https://www.python.org/downloads/)
+[![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-你辛苦找了几个因子，调了参数，平台回测年化不错。下一步通常是看 Sharpe、回撤、胜率，然后开模拟盘。
+**English** · [中文](README.zh-CN.md)
 
-先别急。
+> **The backtest you ran is not the strategy you'll trade.**
+> `strategy-audit` finds the gap — before real money does.
 
-这件事只问一个问题：**这条回测净值，真的是你这套持仓按当时能拿到的数据、按能成交的方式算出来的吗？**
+A local, offline audit for the most quietly expensive step in quantitative research: the journey from a table of *weights* to the *NAV* you report. It doesn't pick factors, it doesn't predict returns, and it never touches the network. It reads your files, recomputes your portfolio, and answers one question — loudly:
 
-`strategy-audit` 不帮你找因子，也不告诉你明天买什么。它把回测结果拿出来对账。很多问题不在因子本身，而在从选股、持仓到净值的这一步：权重表算不出你报的净值；停牌股被悄悄当成没有发生；月末选股却吃进了月末当天的涨跌；换手和容量写得很好看，真下单就不是那么回事。
+> **Is the NAV you're showing actually what these holdings, at these prices, on the days you could actually trade, would have produced?**
 
-这是一个本地工具。文件不上传，也不下载行情。
+---
 
-## 它已经抓到过什么
+## The problem
 
-一份不是作者写的月频策略，给了权重、价格和自报净值。工具先报了两个 BLOCK。
+You found a few factors, tuned the parameters, and the backtest annualizes nicely. The natural next step is Sharpe, drawdown, win rate, paper trading.
 
-第一条是，自报净值比按权重和价格重算的结果高 4.6%。后来翻代码才发现，作者把月频等权在月内每天 `ffill` 回等权，相当于多做了日频再平衡。这部分收益不在月频权重表里。
+Slow down.
 
-第二条更麻烦。同一份持仓，停牌和缺价按三种合理方式记账，累计收益从 +99.1% 到 −3.9%，差了 103 个百分点。此时谈因子强不强没有意义，账都还没记清。
+Most backtest failures aren't in the factors. They're in the **last mile** — the step that turns a list of holdings into a reported NAV:
 
-工具里有 4 项最值得先看的审计：
+- the weight table doesn't reconcile to the NAV you quoted;
+- suspended stocks get quietly treated as if nothing happened;
+- month-end selection quietly eats the month-end return;
+- turnover and capacity look fine on paper, and fall apart on execution.
 
-| 先看什么 | 它在问什么 |
+`strategy-audit` exists because all of these are measurable — and almost all of them are invisible in a Sharpe ratio.
+
+## It has already caught
+
+A monthly strategy (not written by this project) submitted weights, prices, and a self-reported NAV. The tool raised two BLOCKs.
+
+**The first:** the self-reported NAV ran **4.6%** ahead of what the weights and prices actually recompute to. The cause — found only after reading the source — was daily rebalancing hidden inside a "monthly" equal-weight table via `ffill`. That return was never in the weight table.
+
+**The second, and worse:** the same holdings, with suspended names and missing prices booked three reasonable ways, produced cumulative returns from **+99.1%** to **−3.9%** — a **103-percentage-point** spread. At that point, "is the factor any good" is the wrong question. The books aren't even closed.
+
+There are **26 checks across 7 families**, but four deserve to be read first:
+
+| Read first | The question it asks |
 |---|---|
-| 自报净值对账 | 你交的净值，能不能由你交的权重和价格解释 |
-| 缺价记账 | 停牌、退市、价格缺失，会把结果推到什么范围 |
-| 残差有效注数 | 你以为持有 30 只，实际上是不是都在押同一个风险 |
-| 盈亏平衡成本 | 单边成本高到多少 bp，这个策略的收益就没了 |
+| **Self-reported NAV reconciliation** | Can the NAV you submitted be explained by the weights and prices you submitted? |
+| **Missing-price accounting** | How far do suspensions, delistings, and missing prices move the result? |
+| **Residual effective bets** | You think you hold 30 names — are you actually making one bet? |
+| **Breakeven cost** | How many basis points of one-way cost until the edge is gone? |
 
-其余检查也会照常跑。它们不是为了凑一个“26 项体检”，而是帮你判断上面几件事能不能相信。
+The rest run too. They aren't a 26-item checkup for its own sake — they're there to tell you whether you can trust those four answers.
 
-## 你要准备什么
-
-最少给一条净值曲线就能开始。想查得更有用，给三张表：
-
-| 文件 | 最少三列 | 作用 |
-|---|---|---|
-| 目标权重 | `date, code, weight` | 每次调仓后准备持有谁、各占多少 |
-| 日频价格 | `date, code, close` | 用来重算收益、换手和缺价影响 |
-| 你平台里看到的净值 | `date, nav` | 用来和重算结果对账 |
-
-如果还能给价格表里的 `amount`/成交额，会多出容量、流动性和规模衰减检查。若你已经单独算了净收益或基准，也可以传进来做毛净对账和超额收益检查。
-
-目标权重说的是 0.02、0.05 这种比例，不是 500 股、10 万元这种持仓数量。持仓数量没有统一口径，工具不会把名为 `position` 的列硬猜成权重。
-
-## 怎么跑
-
-安装：
+## Install
 
 ```bash
 pip install strategy-audit
 ```
 
-最常见的用法就是把两三个文件扔进去。顺序无所谓，工具会把识别结果打印出来，先看它认对没有。
+Requires Python 3.9+. **Zero data-source dependencies** — it reads your files and computes locally. Nothing is uploaded, nothing is downloaded.
+
+## Quick start
+
+Point it at a couple of files. Order doesn't matter — the tool detects each one and prints what it thinks it found, so check that first.
 
 ```bash
 strategy-audit weights.csv prices.csv nav.csv
 ```
 
-只有净值也能先查：
+Only have a NAV curve? It still works:
 
 ```bash
 strategy-audit nav.csv
 ```
 
-还没有数据，先看一份内置演示：
+No data yet? See what a report looks like:
 
 ```bash
 strategy-audit --demo
 ```
 
-你的净收益和基准不能靠文件名猜。命令行要明确写出来：
+Your *net* returns and *benchmark* can't be guessed from a filename — pass them explicitly:
 
 ```bash
 strategy-audit weights.csv prices.csv \
@@ -80,9 +86,9 @@ strategy-audit weights.csv prices.csv \
   --trials 20
 ```
 
-`--trials 20` 的意思是：这套策略是从大约 20 个因子、窗口、阈值组合里挑出来的。别把它当装饰。工具无法知道你到底试过多少次，只能按你填写的次数折扣 Sharpe。
+`--trials 20` means *"this strategy was picked from roughly 20 factor/window/threshold combinations."* Don't treat it as decoration. The tool can't read your research history, so it discounts Sharpe by the number you give it.
 
-Python 里也一样：
+Same thing from Python:
 
 ```python
 from strategy_audit import audit
@@ -92,102 +98,104 @@ report = audit(weights, prices, nav, net=net_returns,
 print(report.text())
 ```
 
-## 聚宽、BigQuant 和类似平台
+## Give it what you have
 
-这类平台的用户通常不需要改很多数据。
+You don't need to reshape your data to a schema. `strategy-audit` auto-detects files and column names — including Chinese headers like 调仓日 / 证券代码 / 目标权重 / 收盘价 / 成交额. What you can audit scales with what you hand over:
 
-- 持仓长表可以用 `time/date + security/instrument + target_weight/weight`。
-- 行情可以是长表，也可以是“日期为行、证券代码为列”的宽表。
-- 中文列名如“调仓日、证券代码、目标权重、收盘价、成交额”可以识别。
-- `amount` 或“成交额”在价格表里，就会解锁容量检查。
-
-如果平台只给你一张成交记录或当前持仓快照，先别直接跑。那通常没有每个调仓日的**目标权重**，也没有足够的历史价格。回测页上的年化、Sharpe、最大回撤可以交成净值表，先做基础检查；想查换手、前视、停牌和容量，还是得把权重和价格导出来。
-
-日频文件如果中间连续少了 11 个以上工作日，报告会提醒你检查下载是否完整。春节和国庆那种长假不会误报。
-
-## 结果怎么读
-
-报告只有三种等级：
-
-| 标记 | 意思 | 你该做什么 |
+| You have | Audited | Still missing |
 |---|---|---|
-| BLOCK | 这条净值有关键地方解释不通 | 先回到回测代码和数据，修完再谈表现 |
-| WARN | 结果还能看，但要按报告里的量级打折 | 看影响有多大，别直接拿去开模拟盘或上会 |
-| OK | 这一项查过了，没有发现这个问题 | 只代表这一项，没有替整个策略盖章 |
+| A NAV curve | **7 checks** — NAV quality and strategy-level significance | weights & prices |
+| Weights + prices | **21 checks** — adds lookahead, turnover, accounting, risk, prescription | **5 checks (optional inputs)** — amount, net returns, self-reported NAV |
+| + `amount` (turnover value) | **24 checks** — adds capacity, liquidity, size decay | net returns, self-reported NAV |
+| Everything | **26 checks** — the full capability matrix | — |
 
-还有一节叫“未能检查”。它很重要。比如你没有成交额，容量检查就会写“没有查过”，不是“容量没问题”。
+"Couldn't check" is not the same as "passed." The report lists, check by check, exactly what's missing.
 
-一个很实用的顺序是：
+## The seven families
 
-1. 先看 BLOCK。特别是“自报净值对账”和“记账政策决定结论”。
-2. 再看盈亏平衡成本和年化单边换手。策略需要 5bp 成本才赚钱，实际执行大概率很难。
-3. 看容量。如果报告说只能管几千万，你拿它解释几个亿的模拟盘就不合适。
-4. 最后再看 Sharpe、回撤和处方。前面的账没理顺，这些统计做得再精确也没用。
+You don't need to memorize these — read the plain-language conclusions in the report. This is just so you know what each family is probing.
 
-## 能查到多少，取决于你交什么
+### NAV reconciliation *(runs first)*
 
-| 你手上有 | 能审 | 还缺什么 |
+Before any check trusts your numbers, it verifies the numbers are *yours*. If your reported NAV isn't the same curve as the one your weights and prices recompute to, then every check below is auditing a strategy you never actually traded.
+
+### Lookahead & accounting
+
+Did you eat the rebalance-day return? Are your weights carrying same-period information? Did your universe quietly keep only the survivors? How far do the missing-price policies move the answer?
+
+### NAV quality
+
+Is the curve itself even real? Smoothing and lagged pricing show up as return autocorrelation — understated volatility, overstated Sharpe. A NAV that sits still suggests valuations that aren't updating.
+
+### Turnover & cost
+
+Naive turnover vs. price-drifted turnover; whether autocorrelation-based turnover estimates are biased; the cost at which your edge goes to zero; and — if you provide gross and net — how much you actually paid.
+
+### Strategy-level significance
+
+Is the return concentrated in a couple of years or a few days? Does the conclusion flip when the Newey-West lag changes? How much Sharpe survives the multiple-testing discount?
+
+### Risk identity
+
+Is your name-count inflated? Thirty low-vol, small-cap, same-industry names look diversified but may be a handful of independent bets.
+
+### Capacity & tradability
+
+How much weight can't get filled at limit-up/down or on suspensions; how much money the portfolio can actually manage; whether the edge is concentrated in the least tradeable names. It reports execution risk — it doesn't sentence a strategy to death for being small.
+
+### Prescription
+
+The only family that says "here's how to change it" — and it's gated: it only suggests fixes that require *no forecasting*, like dropping weight-tweaks with no value. It refuses far more often than it prescribes, and "not prescribable" isn't a failure — it means the data can't support a clever-looking optimization.
+
+## Reading the report
+
+Three levels, no more:
+
+| Mark | Meaning | What to do |
 |---|---|---|
-| 一条净值曲线 | **7 项**，净值质量和策略层显著性 | 权重和价格 |
-| 权重 + 价格 | **21 项**，含前视、换手、记账、风险和处方 | **5 项（缺可选输入）**：成交额、净收益、自报净值等 |
-| 权重 + 价格 + 成交额 | **24 项** | 净收益、自报净值 |
-| 全部输入 | **26 项**，完整能力矩阵 | — |
+| **BLOCK** | Something key about this NAV doesn't add up | Go back to the code and data; fix it before discussing performance |
+| **WARN** | The result still holds, but discount it by the reported magnitude | Check the size of the impact before paper trading or pitching |
+| **OK** | This item was checked and nothing was found | It's about this one item — not a stamp on the whole strategy |
 
-“审不了”不等于“通过”。工具会在报告末尾逐项写清楚缺什么。
+There's also a section called **"couldn't check,"** and it matters. No turnover-value column? Then capacity is reported as *not checked* — not *fine*.
 
-## 七族检查
+A useful reading order:
 
-不需要记住这些名词。看报告里的中文结论就行。这里列出来，是为了知道每一类问题工具在查什么。
+1. Read the **BLOCKs** first — especially NAV reconciliation and the accounting-policy result.
+2. Then breakeven cost and annualized one-way turnover. A strategy that needs 5 bp to be profitable is hard to trade in practice.
+3. Then capacity. If the report says it manages tens of millions, don't explain a multi-billion sim with it.
+4. Only then Sharpe, drawdown, prescription. If the books don't balance, precise statistics are precisely meaningless.
 
-### 输入契约
+## What it will not do
 
-先确认文件是不是权重、价格和净值。权重和不等于 1、重复日期代码、空权重，都会明确报出来。工具会归一计算，但不会假装这没有改变你的回测口径。
+- **Factor-level lookahead.** If you compute factors with future data and feed the result in as a clean equal-weight table, the weights and NAV can still reconcile — and the "weight lookahead" check reads as not-applicable for equal weights.
+- **Count how many parameters you actually tried.** `n_trials` is on your honor; the tool can't read your backtest history.
+- **Point at the exact line of code.** It can tell you *"the weight table can't explain your reported NAV"* and where to look, but without your strategy source it won't locate the bug.
 
-### 换手与成本
+## FAQ
 
-查朴素换手和价格漂移后的实际换手差多少；查“用自相关估换手”有没有把成本估偏；查成本高到哪里收益归零；有毛净两条曲线时，反推你实际扣了多少成本。
+**"I only have my platform's backtest chart — can I use this?"**
+Yes. Export the dates and cumulative NAV and run the 7 checks. The result only says whether *that curve* has obvious problems.
 
-### 前视与记账
+**"Everything's OK — can I go live?"**
+No. OK means the checked items found nothing. Unprovided data, capacity, real market impact, and future performance are all still outside the tool's scope.
 
-查调仓日的收益有没有提前吃到，权重是否带着同期收益的信息，股票池是否只剩活到样本末的股票，以及缺价按不同政策会差多少。
+**"There's a WARN — should I throw the strategy away?"**
+Read what the WARN actually says. Capacity shortfall and month-end effect are handled differently; some need more data, some need you to discount annualization and Sharpe.
 
-### 策略层显著性
+**"Why do you insist I hand over my self-reported NAV?"**
+Because it's the check that catches the most dangerous bug. Weights and prices can recompute *a* curve, but the one your platform actually reported isn't necessarily the same one.
 
-查收益是否只靠少数年份或少数几天，Newey-West 的 lag 一换结论会不会翻，多试参数后 Sharpe 还剩多少。
+## Documentation
 
-### 风险身份
+- **English** — this file
+- **[中文](README.zh-CN.md)**
 
-查名义持仓数是不是虚胖。30 只低波、小盘、同一行业的票，看着分散，真正独立的风险下注可能很少。
-
-### 容量与可成交性
-
-查涨跌停和缺价时有多少权重下不去，按成交额大概能管多少钱，收益是不是集中在最难成交的股票上。它给的是执行风险，不会因为容量小就把回测直接判死。
-
-### 处方（怎么改）
-
-工具只对“不需要猜未来”的改动给建议，例如少做没有价值的权重微调。微调占换手 ≥ 20% 才有这个旋钮；名单换血是策略观点，工具不会替你乱删。报告经常给出“不可处方”，这不是失败，说明数据不足以支持一个看似聪明的优化建议。
-
-## 三件它审不到的事
-
-- 因子层面的前视。你若用未来数据算因子，再生成一张看起来干净的等权表，权重和净值之间可能仍然对得上。等权组合的“权重前视”检查也会显示不适用。
-- 你到底试过多少个参数。`n_trials` 靠你自己填写，工具没法读懂你的回测历史。
-- 具体是哪一行代码错了。它能告诉你“权重表解释不了自报净值”，也能给排查方向，但不接入策略源码就不能定位到某一行。
-
-## 常见误会
-
-“我只有平台回测图，能不能用？” 可以。把日期和累计净值导出来，先跑 7 项。结果只能说明这条曲线本身有没有明显问题。
-
-“报告全是 OK，是不是可以实盘？” 不能这么理解。OK 表示查过的项目没有发现问题。未提供的数据、策略容量、真实冲击成本和未来表现都还在工具范围外。
-
-“报告有 WARN，要不要把策略扔掉？” 先看 WARN 具体写了什么。容量不足和月末效应的处理不同；有些是需要补数据，有些是需要把年化和 Sharpe 打折。
-
-“为什么一定要我把自报净值也交出来？” 因为这恰好能抓到最隐蔽的错。权重表和价格表可以重算出一条曲线，但你平台真正报出来的那条未必是同一个口径。
-
-## 开发与验证
+## Development
 
 ```bash
 pip install -e ".[dev]"
-pytest          # 357 个测试
+pytest          # 358 tests
 ```
 
-项目使用 MIT License。
+MIT License.

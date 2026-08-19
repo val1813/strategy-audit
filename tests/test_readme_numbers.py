@@ -138,9 +138,12 @@ def test_readme_test_count_matches():
     total = sum(int(ln.split(":")[1].strip())
                 for ln in out.splitlines()
                 if ln.startswith("tests/") and ":" in ln)
-    readme = (root / "README.md").read_text(encoding="utf-8")
-    assert f"{total} 个测试" in readme, (
-        f"实际 {total} 个测试，README 未同步")
+    en = (root / "README.md").read_text(encoding="utf-8")
+    zh = (root / "README.zh-CN.md").read_text(encoding="utf-8")
+    assert f"{total} tests" in en, (
+        f"实际 {total} 个测试，英文 README 未同步")
+    assert f"{total} 个测试" in zh, (
+        f"实际 {total} 个测试，中文 README 未同步")
 
 
 # ---------------- 「你有什么→能审什么」那张表 ----------------
@@ -148,7 +151,7 @@ def test_readme_test_count_matches():
 def test_readme_capability_counts():
     """README 那张表的三个计数必须与 CHECKS 一致（加检查就得改 README）。"""
     from strategy_audit import capability as cap
-    readme = _readme()
+    readme = _readme_zh()
     n_nav = len(cap.available({cap.NAV})[0])
     n_wp = len(cap.available({cap.W, cap.P, cap.NAV})[0])
     n_all = len(cap.CHECKS)
@@ -304,7 +307,7 @@ def test_readme_tweak_share_gap_claim():
     import numpy as np
     from strategy_audit import prescribe as pr
     from synth import equal_weight, make_prices, month_ends
-    readme = _readme()
+    readme = _readme_zh()
     assert f"微调占换手 ≥ {pr.TWEAK_SHARE_FLOOR:.0%}" in readme
 
     p = make_prices(n_codes=60, seed=5)
@@ -328,7 +331,7 @@ def test_readme_documents_every_family():
     因为硬编码了「## 六族检查」而失败，而它本该只关心「都写了没」。
     """
     from strategy_audit import capability as cap
-    readme = _readme()
+    readme = _readme_zh()
     secs = {c.section for c in cap.CHECKS}
     # 标题里的族数必须与实际族数一致（输入契约不算一族）
     n_fam = len(secs - {"输入契约"})
@@ -342,3 +345,17 @@ def _readme():
     from pathlib import Path
     return (Path(__file__).resolve().parent.parent / "README.md").read_text(
         encoding="utf-8")
+
+
+def _readme_zh():
+    from pathlib import Path
+    return (Path(__file__).resolve().parent.parent / "README.zh-CN.md").read_text(
+        encoding="utf-8")
+
+
+def test_readme_language_links():
+    """中英文 README 必须互相链接（英文主版 + 中文版本）。"""
+    en = _readme()
+    zh = _readme_zh()
+    assert "README.zh-CN.md" in en, "英文 README 没有链接到中文版本"
+    assert "README.md" in zh, "中文 README 没有链接到英文版本"
