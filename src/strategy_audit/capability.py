@@ -28,6 +28,13 @@ NET = "net"         # 净收益序列（用于毛净对账）
 BENCH = "bench"     # 基准序列
 AMT = "amount"      # 价格面板里的成交额列（族五容量用）
 OWN_NAV = "own_nav"  # 【客户自己汇报的】那条净值曲线
+OPEN = "open"
+FLAGS = "flags"
+SIG = "signals"
+SIG_ALT = "signals_alt"
+DELISTED = "delisted"
+PARAMS = "params"
+TRADES = "trades"
 
 # ★ 为什么 OWN_NAV 必须与 NAV 分开
 # --------------------------------
@@ -44,6 +51,13 @@ _LABEL = {
     BENCH: "基准序列",
     AMT: "成交额列（价格表里加一列 amount/成交额）",
     OWN_NAV: "你自己汇报的净值曲线",
+    OPEN: "开盘价列（价格表里加 open/开盘价）",
+    FLAGS: "交易标志位（涨跌停价/停牌/ST）",
+    SIG: "信号强度面板（date/code/score）",
+    SIG_ALT: "第二家供应商信号面板",
+    DELISTED: "权威退市名单",
+    PARAMS: "显式声明的策略参数",
+    TRADES: "交易明细（entry_date/code[/exit_date]）",
 }
 
 
@@ -128,6 +142,20 @@ CHECKS = (
           "换手里多少是名单换血、多少是权重微调"),
     Check("prescribe", "削换手处方", "处方（怎么改）", (W, P),
           "有没有一个无需预测的改动能确定改善净收益"),
+
+    # 参数邻域只体检声明档位，不寻优、不推荐换档。
+    Check("holding_neighborhood", "持有期邻域体检", "参数邻域体检", (W, P, PARAMS),
+          "声明持有期是不是孤立尖峰，还是稳定平台"),
+    Check("topn_neighborhood", "Top-N 邻域体检", "参数邻域体检", (W, P, SIG, PARAMS),
+          "用几何年化检查极窄选股口径的宽度梯度"),
+    Check("entry_neighborhood", "入场时点体检", "参数邻域体检", (W, P, OPEN),
+          "open 与 close 入场的配对差异"),
+    Check("signal_consistency", "信号-持仓自洽", "参数邻域体检", (W, SIG),
+          "信号排序能否重现实际买入，抓排序方向与 tie bug"),
+    Check("vendor_pair", "跨供应商配对", "参数邻域体检", (P, SIG, SIG_ALT, PARAMS),
+          "alpha 是策略的还是供应商口径的"),
+    Check("deferred_exit", "跌停出场顺延", "参数邻域体检", (P, FLAGS, TRADES),
+          "出场撞在跌停封板日、顺延后差多少（判板用行情价不用成交价）"),
 )
 
 
@@ -167,7 +195,9 @@ def missing_value(have: set) -> list:
     # 第一版只试单个，于是「只有净值」的用户看到的是
     # 「补权重面板 ⇒ 多 1 项」—— 而权重+价格一起补能多 8 项。
     # 用户看到 1 项就不会去补了，等于把最有价值的建议藏了起来。
-    combos = [(k,) for k in (W, P, NAV, NET, BENCH, AMT, OWN_NAV)]
+    kinds_all = (W, P, NAV, NET, BENCH, AMT, OWN_NAV, OPEN, FLAGS,
+                 SIG, SIG_ALT, DELISTED, PARAMS, TRADES)
+    combos = [(k,) for k in kinds_all]
     combos += [(W, P), (W, P, AMT), (W, P, NET), (W, P, AMT, NET),
                (W, P, OWN_NAV), (W, P, AMT, NET, OWN_NAV)]
     seen = set()
@@ -197,7 +227,8 @@ def matrix_text(have: set) -> str:
     ok, no = available(have)
     lines = []
     lines.append("  你给了：" + ("、".join(
-        _LABEL[k] for k in (W, P, NAV, NET, BENCH, AMT, OWN_NAV) if k in have)
+        _LABEL[k] for k in (W, P, NAV, NET, BENCH, AMT, OWN_NAV, OPEN, FLAGS,
+                            SIG, SIG_ALT, DELISTED, PARAMS, TRADES) if k in have)
         or "（无法识别的输入）"))
     lines.append("")
     lines.append(f"  能审 {len(ok)}/{len(CHECKS)} 项：")

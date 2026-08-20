@@ -173,7 +173,8 @@ def test_readme_demo_capability_claim():
     assert len(ok) == len(cap.CHECKS) - len(no)
     # ★ 从 CHECKS 推导，不写死具体是哪个可选输入（族五加了成交额列时
     # 写死 cap.NET 的版本就红了，而它跟族五无关）
-    optional = {cap.NET, cap.BENCH, cap.AMT, cap.OWN_NAV}
+    optional = {cap.NET, cap.BENCH, cap.AMT, cap.OWN_NAV, cap.OPEN, cap.FLAGS,
+                cap.SIG, cap.SIG_ALT, cap.DELISTED, cap.PARAMS, cap.TRADES}
     for c in no:
         lack = set(c.needs) - have
         assert lack and lack <= optional, (c.key, lack)

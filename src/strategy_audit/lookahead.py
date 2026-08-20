@@ -244,19 +244,45 @@ def check_weight_lookahead(wm: pd.DataFrame, pm: pd.DataFrame,
 
 
 def check_universe_survivorship(wm: pd.DataFrame, pm: pd.DataFrame,
-                               rep: AuditReport) -> None:
+                               rep: AuditReport, delisted=None) -> None:
     """③ 股票池筛选的生存者偏差。
 
     ★ 这是第三处前视，最容易漏：信号滞后了、权重也用期初市值了，
     但股票池是「今天仍在册」的名单 —— 等于用未来信息做了筛选。
     """
     last = pm.index.max()
-    alive = set(pm.loc[[last]].dropna(axis=1).columns)
     held = set(c for c in wm.columns if (wm[c] != 0).any())
     if not held:
         rep.skip("股票池生存者偏差", "权重全为 0")
         return
-
+    if delisted is not None:
+        dl = set(map(str, delisted))
+        held_s = set(map(str, held))
+        touched = held_s & dl
+        rep.stats["n_held"] = len(held)
+        rep.stats["n_held_dead"] = len(touched)
+        if dl and not touched:
+            rep.add(BLOCK, "持仓只落在存活标的上（生存者偏差）",
+                    f"【事实：用户提供退市名单】名单含 {len(dl)} 只退市标的，"
+                    "持仓从未包含其中任何一只",
+                    "股票池可能使用了事后仍在册名单，请核对每个历史时点的可选池",
+                    section=SECTION)
+        else:
+            rep.add(OK, "股票池包含退出标的",
+                    f"【事实：用户提供退市名单】持有过 {len(touched)}/{len(dl)} 只名单内标的",
+                    section=SECTION)
+        return
+    last_row = pm.loc[last]
+    n_alive = int(last_row.notna().sum())
+    n_cols = int(len(last_row))
+    last_cov = n_alive / n_cols if n_cols else 0.0
+    rep.stats["survivorship_last_coverage"] = last_cov
+    if last_cov < 0.5:
+        rep.skip("股票池生存者偏差",
+                 f"末日价格覆盖率仅 {last_cov:.1%}（{n_alive}/{n_cols}）—— "
+                 "面板过于稀疏，无法区分「已退市」与「面板没这天的数」")
+        return
+    alive = set(pm.loc[[last]].dropna(axis=1).columns)
     dead = held - alive
     frac_dead = len(dead) / len(held)
     rep.stats["n_held"] = len(held)

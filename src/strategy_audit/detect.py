@@ -39,6 +39,11 @@ ALIASES = {
     "close": ("close", "close_price", "closeprice", "px", "price", "prc",
               "adj_close", "adjclose", "close_adj", "vwap", "settle",
               "收盘", "收盘价", "价格", "复权价", "后复权", "前复权"),
+    "open": ("open", "open_price", "openprice", "o", "开盘价", "开盘"),
+    "up_limit": ("up_limit", "uplimit", "limit_up", "涨停价", "涨停"),
+    "down_limit": ("down_limit", "downlimit", "limit_down", "跌停价", "跌停"),
+    "is_suspended": ("is_suspended", "suspended", "suspend", "停牌", "是否停牌"),
+    "is_st": ("is_st", "st", "st_flag", "是否st"),
     "nav": ("nav", "net_value", "netvalue", "equity", "cum", "cumnav",
             "cum_nav", "cumulative", "curve", "value", "balance",
             "净值", "累计净值", "单位净值", "权益", "资金曲线", "累计收益"),
@@ -206,6 +211,11 @@ def detect_frame(df: pd.DataFrame, source: str = "") -> Detected:
         c_w = match_column(cols, "weight")
         c_p = match_column(cols, "close")
         c_cap = match_column(cols, "cap")
+        c_open = match_column(cols, "open")
+        c_up = match_column(cols, "up_limit")
+        c_down = match_column(cols, "down_limit")
+        c_suspend = match_column(cols, "is_suspended")
+        c_st = match_column(cols, "is_st")
 
         # 平台持仓快照常把【股数/市值】叫 position。即使其数值恰好每期
         # 加总为 1，也不能静默猜成目标权重；须由导出端明确命名 target_weight。
@@ -244,6 +254,13 @@ def detect_frame(df: pd.DataFrame, source: str = "") -> Detected:
                 colmap["amount"] = c_amt
                 keep.append("amount")
                 notes.append(f"额外带上成交额：{c_amt} → amount（可审容量）")
+            for ck, cv in (("open", c_open), ("up_limit", c_up), ("down_limit", c_down),
+                           ("is_suspended", c_suspend), ("is_st", c_st)):
+                if cv is not None:
+                    out = out.rename(columns={cv: ck})
+                    colmap[ck] = cv
+                    keep.append(ck)
+                    notes.append(f"额外带上可选列：{cv} → {ck}")
             notes.append(f"长表，识别为【价格】：{c_p} → close")
             return Detected("prices", frame=out[keep], layout="long",
                             columns=colmap, notes=notes, source=source)

@@ -38,7 +38,7 @@ A monthly strategy (not written by this project) submitted weights, prices, and 
 
 **The second, and worse:** the same holdings, with suspended names and missing prices booked three reasonable ways, produced cumulative returns from **+99.1%** to **−3.9%** — a **103-percentage-point** spread. At that point, "is the factor any good" is the wrong question. The books aren't even closed.
 
-There are **26 checks across 7 families**, but four deserve to be read first:
+There are **32 checks across 8 families**, but four deserve to be read first:
 
 | Read first | The question it asks |
 |---|---|
@@ -105,19 +105,21 @@ You don't need to reshape your data to a schema. `strategy-audit` auto-detects f
 | You have | Audited | Still missing |
 |---|---|---|
 | A NAV curve | **7 checks** — NAV quality and strategy-level significance | weights & prices |
-| Weights + prices | **21 checks** — adds lookahead, turnover, accounting, risk, prescription | **5 checks (optional inputs)** — amount, net returns, self-reported NAV |
-| + `amount` (turnover value) | **24 checks** — adds capacity, liquidity, size decay | net returns, self-reported NAV |
-| Everything | **26 checks** — the full capability matrix | — |
+| Weights + prices | **21 checks** — adds lookahead, turnover, accounting, risk, prescription | **11 checks (optional inputs)** — amount, net returns, self-reported NAV, params/signals/execution columns, trade details |
+| + `amount` (turnover value) | **24 checks** — adds capacity, liquidity, size decay | net returns, self-reported NAV, params/signals/execution columns, trade details |
+| Everything | **32 checks** — the full capability matrix | — |
 
 "Couldn't check" is not the same as "passed." The report lists, check by check, exactly what's missing.
 
-## The seven families
+## The eight families
 
 You don't need to memorize these — read the plain-language conclusions in the report. This is just so you know what each family is probing.
 
 ### NAV reconciliation *(runs first)*
 
 Before any check trusts your numbers, it verifies the numbers are *yours*. If your reported NAV isn't the same curve as the one your weights and prices recompute to, then every check below is auditing a strategy you never actually traded.
+
+It also refuses to claim a pass it hasn't earned. When your reported NAV and the recomputed one agree to floating-point precision, the two came from the *same* numbers — typical of a platform export — so there is nothing to reconcile. That reports as **SKIP**, not OK: an identity is not a verification. Making this check meaningful requires an independently sourced price panel.
 
 ### Lookahead & accounting
 
@@ -147,15 +149,24 @@ How much weight can't get filled at limit-up/down or on suspensions; how much mo
 
 The only family that says "here's how to change it" — and it's gated: it only suggests fixes that require *no forecasting*, like dropping weight-tweaks with no value. It refuses far more often than it prescribes, and "not prescribable" isn't a failure — it means the data can't support a clever-looking optimization.
 
+### Parameter neighborhood *(diagnose only, never optimize)*
+
+It only examines the `params` you declare explicitly — it does not infer them from data, search for a better setting, or recommend a switch. Holding period is compared on the same set of trades with a paired test; Top-N is a fixed grid reported as geometric annualized figures with no significance claim; with a signal panel it also checks whether your ranking reproduces the fills you actually made.
+
+Given a `down_limit` column and trade details with `exit_date`, it also checks whether **exits landed on limit-down closes** — trades the backtest sold at the closing price but that cannot be sold in reality.
+
+> **Judge limits with market prices, never fill prices.** On a real client workbook, testing `actual fill price == limit price` matched 0 of 796 trades and concluded "no limit-down exits observed." Switching to `market close == limit price` found **8** genuine sealed-limit exits (closing exactly −10.0%), together accounting for **−13.4%** of total P&L. Fill prices carry slippage, so that equality can never hold — and the failure direction is a **false negative**, the worst direction to be wrong in.
+
 ## Reading the report
 
-Three levels, no more:
+Four levels, no more:
 
 | Mark | Meaning | What to do |
 |---|---|---|
 | **BLOCK** | Something key about this NAV doesn't add up | Go back to the code and data; fix it before discussing performance |
 | **WARN** | The result still holds, but discount it by the reported magnitude | Check the size of the impact before paper trading or pitching |
 | **OK** | This item was checked and nothing was found | It's about this one item — not a stamp on the whole strategy |
+| **SKIP** | Inputs are same-source, or independent evidence is missing | Not a pass; supply an independent price/signal panel and re-run |
 
 There's also a section called **"couldn't check,"** and it matters. No turnover-value column? Then capacity is reported as *not checked* — not *fine*.
 
@@ -195,7 +206,7 @@ Because it's the check that catches the most dangerous bug. Weights and prices c
 
 ```bash
 pip install -e ".[dev]"
-pytest          # 358 tests
+pytest          # 374 tests
 ```
 
 MIT License.

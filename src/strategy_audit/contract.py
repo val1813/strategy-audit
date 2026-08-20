@@ -20,7 +20,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from .report import BLOCK, WARN, AuditReport
+from .report import BLOCK, SKIP, WARN, AuditReport
 
 W_REQUIRED = ("date", "code", "weight")
 P_REQUIRED = ("date", "code", "close")
@@ -93,6 +93,15 @@ def load_prices(p: pd.DataFrame, rep: AuditReport) -> pd.DataFrame | None:
 
     p = _norm_dates(p)
     p["close"] = pd.to_numeric(p["close"], errors="coerce")
+    for col in ("open", "amount", "up_limit", "down_limit"):
+        if col in p.columns:
+            p[col] = pd.to_numeric(p[col], errors="coerce")
+    for col in ("is_suspended", "is_st"):
+        if col in p.columns:
+            if not pd.api.types.is_bool_dtype(p[col]):
+                p[col] = p[col].map(lambda x: str(x).strip().lower() in
+                                    {"1", "true", "yes", "y", "是"}
+                                    if pd.notna(x) else np.nan)
 
     dup = int(p.duplicated(["date", "code"]).sum())
     if dup:
@@ -228,6 +237,37 @@ def check_nav_reconciliation(rets: pd.Series, own: pd.Series, role: str,
                  f"重叠不足 3 期，无法对账")
         return {}
     a, b = inside.min(), inside.max()
+
+    # Source-identity guard: a reconciliation made from the same numbers is
+    # not independent evidence. Compare period-by-period, not only endpoints,
+    # because two different paths can have the same cumulative return.
+    if role == "nav":
+        pts = []
+        for d in inside:
+            j = o.index.asof(d)
+            if not pd.isna(j) and (not pts or j != pts[-1]):
+                pts.append(j)
+        own_period = o.loc[pts].pct_change().dropna() if len(pts) >= 2 else pd.Series(dtype=float)
+        # A NAV stamped at period end naturally aligns its change with the end
+        # date. This also handles the common nav=(1+ret).cumprod() export.
+        mine_period = r.reindex(own_period.index)
+    else:
+        common = o.index.intersection(r.index)
+        own_period = o.reindex(common)
+        mine_period = r.reindex(common)
+    valid = own_period.notna() & mine_period.notna()
+    max_resid = (float((own_period[valid] - mine_period[valid]).abs().max())
+                 if int(valid.sum()) >= 2 else np.nan)
+    rep.stats["nav_recon_max_period_resid"] = max_resid
+    if np.isfinite(max_resid) and max_resid < 1e-9:
+        detail = ("你交的净值与按权重+价格重算的结果在浮点精度内完全一致"
+                  f"（max 残差 {max_resid:.1e}）。这说明两者由同一批数字算出；"
+                  "平台导出件通常如此。这是同源恒等式，本项因此不可审，"
+                  "不是审过通过了。")
+        rep.add(SKIP, "自报净值对账：本项不可审（同源）", detail,
+                "要让这一项有内容，需要一份独立来源的价格面板",
+                section="输入契约")
+        return dict(rel=0.0, max_resid=max_resid, identity=True)
 
     if role == "nav":
         # asof：调仓日那天自报曲线上不一定有点（停牌/非交易日）

@@ -83,6 +83,22 @@ def main(argv: list[str] | None = None) -> int:
                     help="净收益/净值文件（用于毛净对账；该角色不能自动猜）")
     ap.add_argument("--benchmark", metavar="FILE",
                     help="基准收益/净值文件（盈亏平衡按超额收益计算）")
+    ap.add_argument("--entry", choices=("close", "open"), default="close",
+                    help="入场价格列（默认 close）")
+    ap.add_argument("--exit", choices=("close", "open"), default="close",
+                    help="出场价格列（默认 close）")
+    ap.add_argument("--signal-lag", type=int, default=0,
+                    help="信号日到执行日的交易日间隔")
+    ap.add_argument("--holding-days", type=int, metavar="H",
+                    help="显式声明当前持有期，仅用于参数邻域体检")
+    ap.add_argument("--top-n", type=int, metavar="N",
+                    help="显式声明当前 Top-N，仅用于参数邻域体检")
+    ap.add_argument("--signals", metavar="FILE",
+                    help="信号面板 date/code/score")
+    ap.add_argument("--signals-alt", metavar="FILE",
+                    help="第二家供应商信号面板 date/code/score")
+    ap.add_argument("--trades", metavar="FILE",
+                    help="交易明细 entry_date/code，可选 exit_date")
     ap.add_argument("--name", default="策略审计", help="报告标题")
     ap.add_argument("--quiet-detection", action="store_true",
                     help="不打印输入识别明细（不推荐：识别错了你会看不出来）")
@@ -109,9 +125,15 @@ def main(argv: list[str] | None = None) -> int:
         if not Path(f).exists():
             raise SystemExit(f"文件不存在：{f}")
 
+    params = {k: v for k, v in {"holding_days": args.holding_days,
+                                "top_n": args.top_n}.items() if v is not None}
     rep = audit(*args.files, net=args.net, benchmark=args.benchmark,
                 n_trials=args.trials, name=args.name,
-                show_detection=not args.quiet_detection)
+                show_detection=not args.quiet_detection,
+                execution={"entry": args.entry, "exit": args.exit,
+                           "signal_lag": args.signal_lag},
+                params=params, signals=args.signals,
+                signals_alt=args.signals_alt, trades=args.trades)
     print(rep.text())
 
     # ★ 退出码：有 BLOCK 返回 1，方便进 CI。

@@ -20,9 +20,10 @@ from dataclasses import dataclass, field
 BLOCK = "BLOCK"      # 净值不可信，必须先修
 WARN = "WARN"        # 可用但要打折
 OK = "OK"
+SKIP = "SKIP"          # 输入齐全但来源同一/数据质量不足，结论不可审
 
-_ICON = {BLOCK: "❌", WARN: "⚠ ", OK: "✅"}
-_ORDER = {BLOCK: 0, WARN: 1, OK: 2}
+_ICON = {BLOCK: "❌", WARN: "⚠ ", OK: "✅", SKIP: "⏭ "}
+_ORDER = {BLOCK: 0, WARN: 1, SKIP: 2, OK: 3}
 
 
 @dataclass

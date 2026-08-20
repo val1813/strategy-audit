@@ -38,9 +38,11 @@ MISSING_POLICIES = ("drop", "hold_last", "zero")
 TRADING_DAYS = 252
 
 
-def price_matrix(p: pd.DataFrame) -> pd.DataFrame:
+def price_matrix(p: pd.DataFrame, field: str = "close") -> pd.DataFrame:
     """价格长表 → date × code 矩阵。不填充 —— 缺失就是缺失。"""
-    m = p.pivot(index="date", columns="code", values="close")
+    if field not in p.columns:
+        return pd.DataFrame(index=pd.DatetimeIndex(pd.to_datetime(p["date"]).unique()))
+    m = p.pivot(index="date", columns="code", values=field)
     return m.reindex(sorted(m.columns), axis=1).sort_index()
 
 
@@ -81,7 +83,8 @@ def _seg_last_gross(pm: pd.DataFrame, t0, t1) -> pd.Series:
 
 
 def period_returns(wm: pd.DataFrame, pm: pd.DataFrame,
-                   policy: str = "hold_last") -> pd.DataFrame:
+                   policy: str = "hold_last", *, entry_pm: pd.DataFrame | None = None,
+                   exit_pm: pd.DataFrame | None = None) -> pd.DataFrame:
     """每个调仓区间的组合收益（买入持有口径）。
 
     返回 DataFrame，index=调仓日 t_k，列：
@@ -94,12 +97,21 @@ def period_returns(wm: pd.DataFrame, pm: pd.DataFrame,
         raise ValueError(f"policy 须为 {MISSING_POLICIES} 之一，收到 {policy!r}")
 
     wm, pm = align(wm, pm)
+    entry_pm = pm if entry_pm is None else align(wm, entry_pm)[1]
+    exit_pm = pm if exit_pm is None else align(wm, exit_pm)[1]
     dates = list(wm.index)
     rows = []
     for t0, t1 in zip(dates[:-1], dates[1:]):
         w = wm.loc[t0]
         held = w != 0.0
-        g = _seg_gross(pm, t0, t1)
+        # Execution prices are deliberately separate from the close panel.
+        # This prevents a synthetic open being smuggled into close and making
+        # reconciliation an algebraic identity.
+        if t0 not in entry_pm.index or t1 not in exit_pm.index:
+            g = pd.Series(np.nan, index=pm.columns)
+        else:
+            with np.errstate(divide="ignore", invalid="ignore"):
+                g = exit_pm.loc[t1] / entry_pm.loc[t0].replace(0.0, np.nan)
         bad = held & ~np.isfinite(g)
         w_missing = float(w[bad].abs().sum())
 
@@ -112,7 +124,12 @@ def period_returns(wm: pd.DataFrame, pm: pd.DataFrame,
             ret = float((wk * (g[keep] - 1.0)).sum() / denom) if denom > 0 else 0.0
         elif policy == "hold_last":
             # 按【最后可见价格】持有 —— 保留退市前的崩盘，只丢掉之后的未知段
-            gl = _seg_last_gross(pm, t0, t1)
+            if t0 in entry_pm.index:
+                last = exit_pm.loc[t0:t1].ffill().iloc[-1]
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    gl = last / entry_pm.loc[t0].replace(0.0, np.nan)
+            else:
+                gl = pd.Series(np.nan, index=pm.columns)
             gg = g.copy()
             gg[bad] = gl[bad]
             # 连一个可见价格都没有（整段缺失）⇒ 只能按不动处理

@@ -59,7 +59,7 @@ from .breadth import (
     residual_breadth,
     residual_breadth_panel,
 )
-from .report import BLOCK, OK, WARN, AuditReport, Finding
+from .report import BLOCK, OK, SKIP, WARN, AuditReport, Finding
 from .significance import (
     check_deflated_sharpe,
     check_drawdown,
@@ -120,6 +120,7 @@ __all__ = [
     "BLOCK",
     "WARN",
     "OK",
+    "SKIP",
     # 契约
     "load_weights",
     "load_prices",

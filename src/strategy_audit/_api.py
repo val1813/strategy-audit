@@ -31,6 +31,7 @@ from . import navquality as nq
 from . import prescribe as px
 from . import significance as sg
 from . import turnover_cost as tc
+from . import parameter_audit as pa
 from .contract import (check_gross, check_nav_reconciliation, load_prices,
                        load_weights, normalize_gross, to_matrix)
 from .core import period_returns, periods_per_year, price_matrix
@@ -151,7 +152,9 @@ def _prepare(inputs) -> list[Detected]:
 
 
 def audit(*inputs, net=None, benchmark=None, n_trials: int = 1,
-          name: str = "策略审计", show_detection: bool = True) -> AuditReport:
+          name: str = "策略审计", show_detection: bool = True,
+          execution: dict | None = None, params: dict | None = None,
+          signals=None, signals_alt=None, delisted=None, trades=None) -> AuditReport:
     """审一份回测。参数随便给，顺序无关。
 
     inputs     权重表 / 价格表 / 净值或收益率序列 / 文件路径，任意组合
@@ -166,6 +169,19 @@ def audit(*inputs, net=None, benchmark=None, n_trials: int = 1,
     这是少数几个「宁可要求用户明说」的地方。
     """
     rep = AuditReport(title=name)
+    execution = {"entry": "close", "exit": "close", "signal_lag": 0,
+                 **(execution or {})}
+    if execution["entry"] not in ("close", "open") or execution["exit"] not in ("close", "open"):
+        raise ValueError("execution.entry/exit 必须是 close 或 open")
+    if int(execution["signal_lag"]) < 0:
+        raise ValueError("execution.signal_lag 必须为非负整数")
+    params = dict(params or {})
+    if trades is not None:
+        trades = trades.copy() if isinstance(trades, pd.DataFrame) else _read_path(str(trades))
+    sig_obj = _read_path(str(signals)) if isinstance(signals, (str, Path)) else signals
+    alt_obj = _read_path(str(signals_alt)) if isinstance(signals_alt, (str, Path)) else signals_alt
+    sig = pa.load_signals(sig_obj) if sig_obj is not None else None
+    sig_alt = pa.load_signals(alt_obj) if alt_obj is not None else None
     det = _prepare(inputs)
 
     if not det:
@@ -213,6 +229,7 @@ def audit(*inputs, net=None, benchmark=None, n_trials: int = 1,
 
     # ---- 契约检查 ----
     wm = pm = None
+    price_fields = {}
     if weights is not None:
         w = load_weights(weights, rep)
         if w is not None:
@@ -222,12 +239,17 @@ def audit(*inputs, net=None, benchmark=None, n_trials: int = 1,
         p = load_prices(prices, rep)
         if p is not None:
             pm = price_matrix(p)
+            price_fields["close"] = pm
+            for field in ("open", "up_limit", "down_limit", "is_suspended", "is_st"):
+                if field in p.columns:
+                    price_fields[field] = price_matrix(p, field)
 
     # 权重表自带 close 时，可以直接当价格面板用
     if pm is None and weights is not None and "close" in weights.columns:
         p = load_prices(weights[["date", "code", "close"]].dropna(), rep)
         if p is not None:
             pm = price_matrix(p)
+            price_fields["close"] = pm
             rep.skip("价格面板", "未单独提供，已从权重表的 close 列取用")
 
     have = set()
@@ -239,6 +261,22 @@ def audit(*inputs, net=None, benchmark=None, n_trials: int = 1,
         have.add(cap.NET)
     if bench is not None:
         have.add(cap.BENCH)
+    if "open" in price_fields:
+        have.add(cap.OPEN)
+    if any(k in price_fields for k in ("up_limit", "down_limit", "is_suspended", "is_st")):
+        have.add(cap.FLAGS)
+    if sig is not None:
+        have.add(cap.SIG)
+    if sig_alt is not None:
+        have.add(cap.SIG_ALT)
+    if params:
+        have.add(cap.PARAMS)
+    if delisted is not None:
+        have.add(cap.DELISTED)
+    # ★ 只有带 exit_date 的交易明细才算 TRADES：跌停出场顺延需要出场日，
+    # 只有 entry_date/code 的表定位不到出场，报「能审」就是把没查显示成查过。
+    if trades is not None and "exit_date" in getattr(trades, "columns", ()):
+        have.add(cap.TRADES)
 
     # 成交额列（族五容量用）。识别层会把 amount 一起带进价格表。
     am = cp.amount_matrix(prices) if prices is not None else None
@@ -251,11 +289,19 @@ def audit(*inputs, net=None, benchmark=None, n_trials: int = 1,
     rets = None
     ppy = None
     if wm is not None and pm is not None and len(wm.index) >= 3:
-        pr = period_returns(wm, pm)
-        rets = pr["ret"]
-        ppy = periods_per_year(wm.index)
+        entry_pm = price_fields.get(execution["entry"])
+        exit_pm = price_fields.get(execution["exit"])
+        if entry_pm is None:
+            rep.skip("执行口径收益", f"entry={execution['entry']} 但价格面板没有该列；不回退到 close")
+        elif exit_pm is None:
+            rep.skip("执行口径收益", f"exit={execution['exit']} 但价格面板没有该列")
+        else:
+            pr = period_returns(wm, pm, entry_pm=entry_pm, exit_pm=exit_pm)
+            rets = pr["ret"]
+            ppy = periods_per_year(wm.index)
         _warn_daily_gap(pm.index, rep)
-        have.add(cap.NAV)
+        if rets is not None:
+            have.add(cap.NAV)
         # ★ 同时给了自报净值时【必须对账】，不能静默丢弃。
         # 第一版这里是 elif：权重+价格在手就自己重算，客户交上来的那条
         # 曲线连看一眼都没有。盲测实测两条差 6.0%（自报 6.19% / 重算 6.66%，
@@ -272,11 +318,11 @@ def audit(*inputs, net=None, benchmark=None, n_trials: int = 1,
                 _to = float(core_turnover(wm, pm)["drift_adj"].mean())
             except Exception:
                 _to = None
-            if cap.can_run("nav_recon", have):
+            if rets is not None and cap.can_run("nav_recon", have):
                 with rep.check("nav_recon"):
                     check_nav_reconciliation(rets, _clean_series(own), own_role, rep,
                                              turnover=_to)
-    elif nav is not None:
+    if rets is None and nav is not None:
         s, role = nav
         n_raw = len(s)
         s = _clean_series(s)
@@ -331,7 +377,10 @@ def audit(*inputs, net=None, benchmark=None, n_trials: int = 1,
                     ("member", la.check_membership_accounting)):
                 if cap.can_run(key, have):
                     with rep.check(key):
-                        fn(wm, pm, rep)
+                        if key == "univ":
+                            fn(wm, pm, rep, delisted=delisted)
+                        else:
+                            fn(wm, pm, rep)
 
     # ---- 族一：换手与成本 ----
     if wm is not None and len(wm.index) >= 3:
@@ -407,7 +456,11 @@ def audit(*inputs, net=None, benchmark=None, n_trials: int = 1,
     if wm is not None and pm is not None and len(wm.index) >= 3:
         if cap.can_run("untradable", have):
             with rep.check("untradable"):
-                cp.check_untradable(wm, pm, rep)
+                st = price_fields.get("is_st")
+                flags = {k: price_fields[k] for k in ("up_limit", "down_limit", "is_suspended")
+                         if k in price_fields}
+                cp.check_untradable(wm, pm, rep, st=st,
+                                    flags=flags or None)
         if cap.can_run("capacity", have):
             with rep.check("capacity"):
                 cp.check_capacity(wm, am, rep, pm=pm)
@@ -430,6 +483,37 @@ def audit(*inputs, net=None, benchmark=None, n_trials: int = 1,
         if cap.can_run("prescribe", have) and ppy:
             with rep.check("prescribe"):
                 px.check_prescription(wm, pm, ppy, rep)
+
+    # ---- 族七：参数邻域与信号自洽（只体检，不寻优）----
+    if wm is not None and sig is not None and cap.can_run("signal_consistency", have):
+        with rep.check("signal_consistency"):
+            pa.check_signal_consistency(wm, sig, int(execution["signal_lag"]),
+                                        (pm.index if pm is not None else wm.index), rep)
+    if wm is not None and pm is not None:
+        if cap.can_run("holding_neighborhood", have):
+            with rep.check("holding_neighborhood"):
+                pa.check_holding(wm, price_fields.get("close", pm),
+                                 price_fields.get(execution["entry"], pm),
+                                 params.get("holding_days"), rep, trades=trades)
+        if cap.can_run("topn_neighborhood", have):
+            with rep.check("topn_neighborhood"):
+                pa.check_topn(sig, price_fields.get("close", pm),
+                              price_fields.get(execution["entry"], pm),
+                              params.get("holding_days"), params.get("top_n"), rep)
+        if cap.can_run("entry_neighborhood", have):
+            with rep.check("entry_neighborhood"):
+                pa.check_entry(wm, price_fields["close"], price_fields["open"], rep)
+        if cap.can_run("vendor_pair", have):
+            with rep.check("vendor_pair"):
+                pa.check_vendor_pair(sig, sig_alt, price_fields["close"],
+                                     price_fields.get(execution["entry"], pm), params, rep)
+        if cap.can_run("deferred_exit", have):
+            with rep.check("deferred_exit"):
+                pa.check_deferred_exit(
+                    trades, price_fields.get("close", pm),
+                    {k: price_fields[k] for k in ("down_limit",) if k in price_fields},
+                    rep, wm=wm,
+                    entry_pm=price_fields.get(execution["entry"], pm))
 
     # ★ 一条 finding 都没有时必须解释为什么，不能交一份空报告。
     # 实测：单行表/全 NaN/净值全 0 这三种输入会走到这里 ——
@@ -455,14 +539,20 @@ def audit(*inputs, net=None, benchmark=None, n_trials: int = 1,
     # ★ 缺什么要说人话，不能漏内部键名（"缺 net" 用户看不懂）
     ok, no = cap.available(have)
     for c in no:
-        lack = "、".join(cap.label(k) for k in c.needs if k not in have)
-        rep.skip(c.name, f"缺{lack}")
+        if c.key == "vendor_pair" and cap.SIG_ALT not in have:
+            rep.skip(c.name, "缺第二家供应商的信号面板；补上可回答「alpha 是策略的还是数据商口径的」——这是本工具最强的单条结论")
+        else:
+            lack = "、".join(cap.label(k) for k in c.needs if k not in have)
+            rep.skip(c.name, f"缺{lack}")
 
     return rep
 
 
 def audit_strategy(weights, prices, *, net_returns=None, benchmark=None,
-                   name: str = "策略审计") -> AuditReport:
+                   name: str = "策略审计", execution=None, params=None,
+                   signals=None, signals_alt=None, delisted=None, trades=None) -> AuditReport:
     """旧接口，保留向后兼容。新代码请用 audit()。"""
     return audit(weights, prices, net=net_returns, benchmark=benchmark,
-                 name=name)
+                 name=name, execution=execution, params=params,
+                 signals=signals, signals_alt=signals_alt, delisted=delisted,
+                 trades=trades)

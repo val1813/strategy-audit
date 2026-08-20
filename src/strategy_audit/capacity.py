@@ -275,7 +275,8 @@ def check_capacity(wm: pd.DataFrame, am: pd.DataFrame,
 
 def untradable_weight(wm: pd.DataFrame, pm: pd.DataFrame,
                       rm: pd.DataFrame | None = None,
-                      st: pd.DataFrame | None = None) -> pd.DataFrame:
+                      st: pd.DataFrame | None = None,
+                      flags: dict | None = None) -> pd.DataFrame:
     """逐调仓日:要建/调的仓里有多少权重当天根本下不去。
 
     涨跌停按「日收益 ≥ +限幅」/「≤ −限幅」推断；停牌按「该日无价格」推断。
@@ -328,8 +329,20 @@ def untradable_weight(wm: pd.DataFrame, pm: pd.DataFrame,
             L = L.where(~is_st.astype(bool), ST_LIMIT)
         up = (r >= (L - LIMIT_TOL)).fillna(False)      # 涨停：买不进
         down = (r <= -(L - LIMIT_TOL)).fillna(False)   # 跌停：卖不出
+        flags = flags or {}
+        up_limit = flags.get("up_limit")
+        down_limit = flags.get("down_limit")
+        suspended = flags.get("is_suspended")
+        if up_limit is not None and cur in up_limit.index:
+            ul = up_limit.loc[cur].reindex(idx)
+            up = (pm2.loc[cur, idx] >= ul * (1 - LIMIT_TOL)).fillna(False)
+        if down_limit is not None and cur in down_limit.index:
+            dl = down_limit.loc[cur].reindex(idx)
+            down = (pm2.loc[cur, idx] <= dl * (1 + LIMIT_TOL)).fillna(False)
         buying = dw_signed[mask] > 0
         no_price = ~np.isfinite(pm2.loc[cur, idx])
+        if suspended is not None and cur in suspended.index:
+            no_price = (no_price | suspended.loc[cur].reindex(idx).fillna(False).astype(bool))
         # ★ 方向感知：涨停只挡买入、跌停只挡卖出、无价格两边都挡
         blocked = ((up & buying) | (down & ~buying) | no_price)
         rows.append(dict(date=cur,
@@ -344,9 +357,10 @@ def untradable_weight(wm: pd.DataFrame, pm: pd.DataFrame,
 
 
 def check_untradable(wm: pd.DataFrame, pm: pd.DataFrame,
-                     rep: AuditReport) -> pd.DataFrame:
+                     rep: AuditReport, *, st: pd.DataFrame | None = None,
+                     flags: dict | None = None) -> pd.DataFrame:
     """② 调仓日不可成交的权重占比。"""
-    d = untradable_weight(wm, pm)
+    d = untradable_weight(wm, pm, st=st, flags=flags)
     if not len(d):
         rep.skip("不可成交权重", "没有可用的调仓与价格数据")
         return d
@@ -365,13 +379,15 @@ def check_untradable(wm: pd.DataFrame, pm: pd.DataFrame,
     n_ok = int(d["n_limit_ok"].sum()) if "n_limit_ok" in d else 0
     rep.stats["untradable_n_limit"] = n_lim
     rep.stats["untradable_n_limit_passed"] = n_ok
-    detail = (f"调仓日需要交易的权重里,推断不可成交的占比中位数 {med:.1%}"
+    source_note = ("【事实：用户提供标志位】" if flags or st is not None else
+                   "【推断：按代码猜板，会误判】")
+    detail = (f"调仓日需要交易的权重里,不可成交的占比中位数 {med:.1%}"
               f"（最差一期 {worst:.1%}）"
               f"\n其中真正挡住的涨跌停 {n_lim} 个标的-期"
               f"（涨停要买 / 跌停要卖）、无价格（疑似停牌）{n_npx} 个"
               f"\n另有 {n_ok} 个标的-期触板但【方向不挡】"
               f"（涨停要卖、跌停要买都能成交）—— 已放行,不计入上面的比例"
-              f"\n★ 这是【推断】不是事实：按 6 位数字代码判板"
+              f"\n★ 数据来源：{source_note}。按 6 位数字代码判板"
               f"（主板 10%、创业板/科创板 20%、北交所 30%）。"
               f"新股前 5 日无限幅、ST 是 5%（可传 st 标志位面板覆盖）"
               f"—— 仍会误判")

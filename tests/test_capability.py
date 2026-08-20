@@ -44,7 +44,8 @@ def test_weights_and_prices_unlock_almost_all():
     base = {cap.W, cap.P, cap.NAV}
     # OWN_NAV 也是可选输入：NAV 可以是工具自己重算的，
     # 而「客户亲手交上来的那条净值」只有他给了才有。
-    optional = {cap.NET, cap.BENCH, cap.AMT, cap.OWN_NAV}
+    optional = {cap.NET, cap.BENCH, cap.AMT, cap.OWN_NAV, cap.OPEN, cap.FLAGS,
+                cap.SIG, cap.SIG_ALT, cap.DELISTED, cap.PARAMS, cap.TRADES}
     ok, no = cap.available(base)
     assert len(ok) == len(cap.CHECKS) - len(no)
     for c in no:
